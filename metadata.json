@@ -1,0 +1,6 @@
+{
+  "name": "ServerForge",
+  "description": "Native Windows (.NET 10 LTS / WPF) self-hosted deployment platform for IIS, Windows Services, GitHub auto-deployments, SQL Server, and PostgreSQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

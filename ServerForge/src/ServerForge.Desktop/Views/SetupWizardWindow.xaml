@@ -1,0 +1,79 @@
+<Window x:Class="ServerForge.Desktop.Views.SetupWizardWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ServerForge — First-Launch Setup"
+        Width="780" Height="560"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        Background="{DynamicResource CanvasBackgroundBrush}"
+        Foreground="{DynamicResource TextPrimaryBrush}">
+    <Grid Margin="28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,20">
+            <TextBlock Text="ServerForge Setup Wizard" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" />
+            <TextBlock Text="{Binding StepTitle}" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,8" />
+            <ProgressBar Minimum="1" Maximum="10" Value="{Binding CurrentStep}" Height="4" />
+        </StackPanel>
+
+        <!-- Step Content -->
+        <Border Grid.Row="1" Style="{StaticResource CardContainerStyle}">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <TextBlock Text="ServerForge runs 100% locally on your Windows 11 PC using SQLite and Windows DPAPI — no cloud ServerForge account or external metadata database is required."
+                               TextWrapping="Wrap" Margin="0,0,0,14" Foreground="{DynamicResource TextSecondaryBrush}" />
+
+                    <StackPanel Margin="0,6">
+                        <TextBlock Text="Local Admin Display Name" Margin="0,0,0,4" />
+                        <TextBox Text="{Binding AdminDisplayName, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,0,0,10" />
+
+                        <TextBlock Text="Local Admin Username" Margin="0,0,0,4" />
+                        <TextBox Text="{Binding AdminUsername, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,0,0,10" />
+
+                        <TextBlock Text="GitHub Fine-Grained PAT (encrypted locally via DPAPI)" Margin="0,0,0,4" />
+                        <DockPanel Margin="0,0,0,6">
+                            <Button Content="Validate Token" Command="{Binding ValidateGitHubTokenCommand}" DockPanel.Dock="Right" Margin="8,0,0,0" Style="{StaticResource PrimaryButtonStyle}" />
+                            <TextBox Text="{Binding GitHubToken, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                        </DockPanel>
+                        <TextBlock Text="{Binding GitHubValidationSummary}" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,0,12" />
+
+                        <TextBlock Text="Remote Windows Server (VPN / Private IP)" Margin="0,0,0,4" />
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*" />
+                                <ColumnDefinition Width="10" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0" Text="{Binding ServerHostAddress}" Padding="8,6" />
+                            <TextBox Grid.Column="2" Text="{Binding ServerAgentPort}" Padding="8,6" />
+                        </Grid>
+
+                        <TextBlock Text="Agent One-Time Pairing Code &amp; Server Cert Thumbprint" Margin="0,0,0,4" />
+                        <TextBox Text="{Binding AgentPairingCode}" Padding="8,6" Margin="0,0,0,6" />
+                        <TextBox Text="{Binding AgentCertThumbprint}" Padding="8,6" Margin="0,0,0,8" />
+
+                        <WrapPanel Margin="0,4">
+                            <Button Content="Verify DPAPI Store" Command="{Binding VerifyDpapiStoreCommand}" Margin="0,0,8,0" Padding="12,6" />
+                            <Button Content="Pair Agent (mTLS)" Command="{Binding PairAgentCommand}" Margin="0,0,8,0" Padding="12,6" />
+                            <Button Content="Run Read-Only Diagnostics" Command="{Binding RunReadOnlyDiagnosticsCommand}" Padding="12,6" />
+                        </WrapPanel>
+                        <TextBlock Text="{Binding PairingStatus}" FontSize="12" Margin="0,8,0,0" Foreground="{DynamicResource TextSecondaryBrush}" />
+                    </StackPanel>
+
+                    <TextBlock Text="{Binding StatusBanner}" Margin="0,12,0,0" Foreground="{DynamicResource WarningBrush}" TextWrapping="Wrap" />
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <!-- Footer Controls -->
+        <DockPanel Grid.Row="2" Margin="0,18,0,0">
+            <Button Content="Back" Command="{Binding PreviousStepCommand}" DockPanel.Dock="Left" Padding="16,8" />
+            <Button Content="Continue" Command="{Binding NextStepCommand}" DockPanel.Dock="Right" Style="{StaticResource PrimaryButtonStyle}" />
+        </DockPanel>
+    </Grid>
+</Window>

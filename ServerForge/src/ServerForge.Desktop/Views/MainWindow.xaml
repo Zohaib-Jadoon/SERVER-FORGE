@@ -1,0 +1,147 @@
+<Window x:Class="ServerForge.Desktop.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ServerForge — Native Windows Self-Hosted Deployment Platform"
+        Width="1360" Height="860"
+        MinWidth="1024" MinHeight="680"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource CanvasBackgroundBrush}"
+        Foreground="{DynamicResource TextPrimaryBrush}">
+    <Window.InputBindings>
+        <KeyBinding Key="D1" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Overview" />
+        <KeyBinding Key="D2" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Applications" />
+        <KeyBinding Key="D3" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Deployments" />
+        <KeyBinding Key="D4" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="GitHub" />
+        <KeyBinding Key="D5" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Domains" />
+        <KeyBinding Key="D6" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="EnvVars" />
+        <KeyBinding Key="D7" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Databases" />
+        <KeyBinding Key="D8" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Servers" />
+        <KeyBinding Key="D9" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Monitoring" />
+        <KeyBinding Key="T" Modifiers="Ctrl" Command="{Binding ToggleThemeCommand}" />
+    </Window.InputBindings>
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="248" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Native WPF Navigation Sidebar (12 Required Sections) -->
+        <Border Grid.Column="0" Background="{DynamicResource SidebarBackgroundBrush}" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,0,1,0">
+            <DockPanel LastChildFill="True">
+                <StackPanel DockPanel.Dock="Top" Margin="18,18,18,14">
+                    <TextBlock Text="ServerForge" FontSize="19" FontWeight="Bold" />
+                    <TextBlock Text="Windows Deployment Control" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" />
+                </StackPanel>
+
+                <!-- Explicit Mode & Theme Footer -->
+                <StackPanel DockPanel.Dock="Bottom" Margin="12,12,12,16">
+                    <Button Content="Toggle Theme (Ctrl+T)" Command="{Binding ToggleThemeCommand}" Margin="0,0,0,6" Padding="10,7" />
+                    <Button Content="Toggle Isolated Demo Mode" Command="{Binding ToggleDemoModeCommand}" Padding="10,7" />
+                </StackPanel>
+
+                <ListBox ItemsSource="{Binding NavigationItems}"
+                         SelectedItem="{Binding SelectedSection, Mode=TwoWay}"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="6,5">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{Binding Title}" FontSize="13" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding ShortcutHint}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+
+        <!-- Primary Workspace Viewport -->
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Top Workspace Header -->
+            <Border Grid.Row="0" Padding="24,16" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,0,0,1">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Left">
+                        <TextBlock Text="{Binding SelectedSection.Title}" FontSize="20" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding SelectedSection.Description}" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" />
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="Refresh Live State" Command="{Binding RefreshLiveDataCommand}" Style="{StaticResource PrimaryButtonStyle}" />
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- Active Section Canvas -->
+            <ScrollViewer Grid.Row="1" Padding="24" VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <!-- Explicit Live vs Demo Mode Banner -->
+                    <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+                        <DockPanel>
+                            <TextBlock Text="{Binding StatusMessage}" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap" />
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Applications Grid -->
+                    <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+                        <StackPanel>
+                            <TextBlock Text="Managed Applications" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
+                            <DataGrid ItemsSource="{Binding Applications}" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" MinHeight="140">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
+                                    <DataGridTextColumn Header="Runtime" Binding="{Binding RuntimeType}" Width="*" />
+                                    <DataGridTextColumn Header="Repository" Binding="{Binding RepositoryFullName}" Width="2*" />
+                                    <DataGridTextColumn Header="Branch" Binding="{Binding Branch}" Width="*" />
+                                    <DataGridTextColumn Header="Domain" Binding="{Binding PrimaryDomain}" Width="1.5*" />
+                                    <DataGridTextColumn Header="Port" Binding="{Binding InternalPort}" Width="80" />
+                                    <DataGridTextColumn Header="Auto Deploy" Binding="{Binding AutoDeployEnabled}" Width="90" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Existing Unmanaged IIS Protection Inventory -->
+                    <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+                        <StackPanel>
+                            <TextBlock Text="Discovered IIS Websites (Pre-existing Sites Protected Read-Only)" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
+                            <DataGrid ItemsSource="{Binding DiscoveredIisSites}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="110">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Site Name" Binding="{Binding Name}" Width="2*" />
+                                    <DataGridTextColumn Header="State" Binding="{Binding State}" Width="*" />
+                                    <DataGridTextColumn Header="AppPool" Binding="{Binding AppPoolName}" Width="1.5*" />
+                                    <DataGridTextColumn Header="Classic ASP" Binding="{Binding ContainsClassicAspIndicators}" Width="95" />
+                                    <DataGridTextColumn Header="Protection" Binding="{Binding ManagementState}" Width="1.5*" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Deployment History & Audit Trail -->
+                    <Border Style="{StaticResource CardContainerStyle}">
+                        <StackPanel>
+                            <TextBlock Text="Deployment Lifecycle History &amp; Audit Events" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
+                            <DataGrid ItemsSource="{Binding Deployments}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="140">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="State" Binding="{Binding State}" Width="120" />
+                                    <DataGridTextColumn Header="Commit" Binding="{Binding CommitSha}" Width="120" />
+                                    <DataGridTextColumn Header="Branch" Binding="{Binding Branch}" Width="100" />
+                                    <DataGridTextColumn Header="Trigger" Binding="{Binding TriggeredBy}" Width="150" />
+                                    <DataGridTextColumn Header="Zero-Downtime Note" Binding="{Binding ZeroDowntimeNote}" Width="2*" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</Window>

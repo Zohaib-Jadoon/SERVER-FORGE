@@ -1,0 +1,13 @@
+bin/
+obj/
+artifacts/
+publish/
+*.user
+*.suo
+.vs/
+*.db
+*.db-shm
+*.db-wal
+*.pfx
+*.key
+*.env

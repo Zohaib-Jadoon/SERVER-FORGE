@@ -1,0 +1,38 @@
+# Template GitHub Actions workflow for applications deployed by ServerForge Agent.
+# Place in your application repository as `.github/workflows/serverforge-deploy.yml`.
+# ServerForge Agent polls for completed successful runs on your configured branch,
+# downloads the verified Windows artifact, checks SHA-256, and stages an immutable release.
+
+name: ServerForge Build & Publish Artifact
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-windows-artifact:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 (adjust for .NET / Python apps)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies & Build Production Output
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload Verified Release Artifact for ServerForge Agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverforge-release-${{ github.sha }}
+          path: |
+            .next/standalone/**
+            .next/static/**
+            public/**
+            dist/**
+          retention-days: 14

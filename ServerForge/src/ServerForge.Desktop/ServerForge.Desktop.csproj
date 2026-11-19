@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <AssemblyName>ServerForge.Desktop</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Sinks.File" />
+    <ProjectReference Include="..\ServerForge.Contracts\ServerForge.Contracts.csproj" />
+    <ProjectReference Include="..\ServerForge.Core\ServerForge.Core.csproj" />
+    <ProjectReference Include="..\ServerForge.Security\ServerForge.Security.csproj" />
+    <ProjectReference Include="..\ServerForge.Infrastructure\ServerForge.Infrastructure.csproj" />
+    <ProjectReference Include="..\ServerForge.GitHub\ServerForge.GitHub.csproj" />
+    <ProjectReference Include="..\ServerForge.Databases.SqlServer\ServerForge.Databases.SqlServer.csproj" />
+    <ProjectReference Include="..\ServerForge.Databases.PostgreSql\ServerForge.Databases.PostgreSql.csproj" />
+  </ItemGroup>
+</Project>
