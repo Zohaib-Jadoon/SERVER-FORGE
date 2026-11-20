@@ -120,9 +120,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $installerAbsDir = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\installers'
+          $smokeLogAbsDir  = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\smoke-logs'
           & ./ServerForge/scripts/smoke-test-installers.ps1 `
-            -InstallerDir 'ServerForge/artifacts/installers' `
-            -LogOutputDir 'ServerForge/artifacts/smoke-logs'
+            -InstallerDir $installerAbsDir `
+            -LogOutputDir $smokeLogAbsDir
           if ($LASTEXITCODE -ne 0) {
             Write-Error "smoke-test-installers.ps1 failed with exit code $LASTEXITCODE"
             exit $LASTEXITCODE

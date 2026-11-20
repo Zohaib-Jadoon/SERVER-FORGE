@@ -124,7 +124,7 @@ begin
     if RunHiddenSc('query "' + SvcName + '"', ResultCode) then
     begin
       Attempts := Attempts + 1;
-      if Attempts >= 6 then
+      if Attempts >= 10 then
         Break;
     end
     else

@@ -92,6 +92,7 @@ To manage the remote Windows Server from your Windows 11 PC:
 - **Safe Uninstall**:
   - Uninstalling **ServerForge Desktop** removes binaries only and **preserves** `%LOCALAPPDATA%\ServerForge` (SQLite DB, DPAPI client cert, and paired server metadata).
   - Uninstalling **ServerForge Agent** stops and deletes ONLY the `ServerForgeAgent` Windows Service and binaries — it **NEVER** deletes `C:\ServerForgeApps`, hosted websites, IIS sites, AppPools, or databases.
+  - **Automated / Silent Uninstall Tip**: When invoking `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="..."` from scripts or CI, always pass a **fully qualified absolute path** to `/LOG=` (for example `/LOG="C:\Temp\desktop-uninstall.log"`). Inno Setup copies its uninstaller into `%TEMP%\_iu*.tmp` and re-launches with `%TEMP%` as its working directory, so relative `/LOG=` paths will fail with exit code `1`.
 
 ---
 
