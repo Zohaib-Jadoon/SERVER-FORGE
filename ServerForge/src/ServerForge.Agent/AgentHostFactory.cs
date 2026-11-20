@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Serilog;
 using ServerForge.Agent.Configuration;
+using ServerForge.Agent.Security;
 using ServerForge.Agent.Workers;
 using ServerForge.Contracts.Dtos;
 using ServerForge.Contracts.Enums;
@@ -237,13 +238,15 @@ public static class AgentHostFactory
         builder.Services.AddSingleton<IAppDeploymentAdapter, AspNetCoreDeploymentAdapter>();
         builder.Services.AddSingleton<IAppDeploymentAdapter, ClassicAspDeploymentAdapter>();
         builder.Services.AddSingleton<IAppDeploymentAdapter, PythonFastApiDeploymentAdapter>();
+        builder.Services.AddSingleton<IGitHubArtifactProvenanceVerifier, AgentGitHubProvenanceVerifier>();
         builder.Services.AddSingleton<IDeploymentEngine>(sp => new DeploymentOrchestrator(
             sp.GetServices<IAppDeploymentAdapter>(),
             sp.GetRequiredService<IPathBoundaryGuard>(),
             sp.GetRequiredService<ISecretProtector>(),
             sp.GetRequiredService<IHttpClientFactory>().CreateClient("DeploymentHealth"),
             sp.GetRequiredService<ILogger<DeploymentOrchestrator>>(),
-            sp.GetRequiredService<IDeploymentStatePersistence>()));
+            sp.GetRequiredService<IDeploymentStatePersistence>(),
+            sp.GetRequiredService<IGitHubArtifactProvenanceVerifier>()));
 
         if (enableAutoDeployWorker)
             builder.Services.AddHostedService<GitHubAutoDeployWorker>();
@@ -647,16 +650,41 @@ public static class AgentHostFactory
             TriggerDeploymentRequest request,
             ServerForgeStore store,
             IDeploymentEngine engine,
+            ClaimsPrincipal user,
             CancellationToken ct) =>
         {
             var target = await store.GetApplicationByIdAsync(request.ApplicationId, ct);
             if (target is null)
                 return Results.NotFound($"Application {request.ApplicationId} is not registered on this agent.");
 
+            // Security boundary (Phase 12.1):
+            // 1. External API requests to /api/v1/deployments/trigger are NEVER genuine autonomous polling;
+            //    only GitHubAutoDeployWorker inside the Agent process triggers autonomous deployments.
+            // 2. In GitHubActionsArtifact mode, callers may NEVER supply local file paths or untrusted URLs;
+            //    the Agent independently queries and verifies the artifact through IGitHubArtifactProvenanceVerifier.
+            if (target.SourceMode == DeploymentSourceMode.GitHubActionsArtifact &&
+                !string.IsNullOrWhiteSpace(request.ArtifactDownloadUrl))
+            {
+                return Results.BadRequest(new
+                {
+                    error = "GitHubActionsArtifact mode rejects caller-supplied artifact file paths or URLs. " +
+                            "The Agent resolves and verifies GitHub Actions artifacts server-side via its authorized GitHub client. " +
+                            "Use ManualSignedPackage source mode for explicitly authorized local packages."
+                });
+            }
+
+            var sanitizedRequest = request with
+            {
+                TriggeredAutomatically = false,
+                RequestedBy = string.IsNullOrWhiteSpace(request.RequestedBy)
+                    ? (user.Identity?.Name ?? "DesktopAdmin")
+                    : request.RequestedBy
+            };
+
             var env = await store.ResolveDecryptedEnvVarsAsync(target.Id, EnvironmentTier.Production, ct);
-            var record = await engine.EnqueueAndExecuteAsync(target, request, env, cancellationToken: ct);
+            var record = await engine.EnqueueAndExecuteAsync(target, sanitizedRequest, env, cancellationToken: ct);
             await store.RecordDeploymentAsync(record, ct);
-            await store.UpsertApplicationAsync(target, request.RequestedBy, ct);
+            await store.UpsertApplicationAsync(target, sanitizedRequest.RequestedBy, ct);
             return Results.Ok(record);
         });
 

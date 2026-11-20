@@ -1,80 +1,121 @@
-# ServerForge — Disposable Windows IIS End-to-End Test Guide
+# ServerForge — Disposable Windows IIS E2E Test Guide (Phase 12.1)
 
-This guide describes how to execute **real Windows IIS end-to-end deployment, update, and automatic rollback verification** using the reproducible Phase 12 harness (`ServerForge/scripts/e2e/*.ps1`) without ever risking a production server, production IIS site, or existing database.
+This guide provides the exact, reproducible steps to run **TEST A** (locally built, hash-verified sample artifact deployed to real IIS) and **TEST B** (genuine autonomous GitHub Actions polling, update, HTTP 503 rollback, anti-retry-loop, and recovery) on a **dedicated disposable Windows Server IIS VM**.
 
-## 1. Strict Safety Rules
-- **NEVER run on a production Windows Server.** `preflight.ps1` automatically aborts if a `ServerForgeAgent` Windows Service or `C:\ProgramData\ServerForge\Agent\agent-identity.json` already exists.
-- **No automatic role mutation.** The harness never installs Windows Server roles or alters host-wide IIS settings.
-- **Strict ownership namespace.** Every test resource uses the prefix `ServerForge_E2E_<RunId>`:
-  - IIS Site: `ServerForge_E2E_<RunId>` (bound strictly to `http/127.0.0.1:<AppPort>:`)
-  - IIS AppPool: `ServerForge_E2E_<RunId>_Pool` (`No Managed Code`, `ApplicationPoolIdentity`)
-  - Agent Service: `ServerForge_E2E_<RunId>_Agent` (bound strictly to `https://127.0.0.1:<AgentPort>`)
-  - Workspace: `C:\Temp\ServerForge_E2E_<RunId>`
-- **Zero secret exposure.** Pairing codes, PATs, passwords, and private keys are never written to console output, JSON evidence, or diagnostic bundles.
+> **CRITICAL SAFETY RULE:** NEVER run these scripts or `e2e-disposable-iis.yml` against a production Windows Server or a machine running a production `ServerForgeAgent` Windows Service.
 
-## 2. Disposable Windows Server VM Prerequisites
-Provision a **fresh disposable Windows Server 2022/2025 VM** (or isolated Windows 11 lab VM) with:
-1. **Microsoft IIS (`Web-Server` role)** installed and `W3SVC` service running.
-2. **.NET 10 Windows Hosting Bundle** installed (`AspNetCoreModuleV2` / `aspnetcorev2.dll` present in IIS).
-3. **.NET 10 SDK** installed (to compile `ServerForge/samples/disposable-test-app/ServerForge.SampleApp.csproj`).
-4. Downloaded `ServerForge-Agent-Setup.exe` and `SHA256SUMS.txt` from a green CI build (verify SHA-256 first).
+---
 
-## 3. Option A — Run the 6-Script Harness Directly on the Disposable IIS VM
+## 1. Disposable Windows IIS VM Prerequisites
 
-Open an **Administrator PowerShell 7 (`pwsh`) or Windows PowerShell 5.1** console at the repository root:
+Provision a fresh, disposable Windows Server 2022/2025 (or Windows 11 Pro) VM with:
+
+1. **Microsoft IIS (`Web-Server`)** installed and `W3SVC` running (`appcmd.exe` and `w3wp.exe` present under `C:\Windows\System32\inetsrv\`).
+2. **.NET 10 Windows Hosting Bundle (`AspNetCoreModuleV2`)** installed (`aspnetcorev2.dll` present) and `iisreset` completed.
+3. **.NET 10 LTS SDK** installed (for building `ServerForge.SampleApp` and installers if building locally).
+4. **Inno Setup 6 (`ISCC.exe`)** installed (only needed if building `ServerForge-Agent-Setup.exe` directly on the VM; otherwise download the verified installer artifact from GitHub Actions Run #9/#10 and verify `SHA256SUMS.txt`).
+5. **No production ServerForge installation**: `Get-Service ServerForgeAgent` must not exist and `C:\ProgramData\ServerForge\Agent\agent-identity.json` must not exist.
+6. **Positive Disposable Host Identity Marker** (MANDATORY safety gate enforced by `preflight.ps1` and `e2e-disposable-iis.yml`):
+   ```powershell
+   New-Item -ItemType Directory -Path 'C:\ProgramData\ServerForgeE2E' -Force | Out-Null
+   Set-Content -Path 'C:\ProgramData\ServerForgeE2E\DISPOSABLE_IIS_E2E_HOST.marker' -Value 'SERVERFORGE_DISPOSABLE_E2E_HOST=true' -Encoding UTF8
+   ```
+7. **PowerShell 5.1 or PowerShell 7+**: All scripts in `ServerForge/scripts/e2e/` are tested for PowerShell 5.1 (.NET Framework 4.8 `WebRequestHandler` TLS thumbprint pinning) and PowerShell 7+ (`HttpClientHandler.ServerCertificateCustomValidationCallback`).
+
+---
+
+## 2. Running TEST A — Real IIS with Locally Built Sample Artifacts (`ManualSignedPackage`)
+
+TEST A verifies:
+- Fail-closed mTLS pairing, wrong-thumbprint rejection, pairing replay rejection, anonymous rejection, Agent restart identity persistence.
+- Live negative provenance check (`TESTA.SEC.1`) confirming `GitHubActionsArtifact` rejects caller-supplied local ZIP paths (`HTTP 400`).
+- Real IIS site/AppPool creation on isolated loopback port `127.0.0.1:15199`, on-disk `web.config` env var injection, v1 → v2 updates with Desktop closed, persistent `/data` survival, HTTP 503 automatic rollback, Agent service restart resilience, and unmanaged IIS site preservation.
+
+Run from an **elevated Administrator PowerShell prompt** on the disposable IIS VM:
 
 ```powershell
-$RunId          = "vm$(Get-Date -Format 'yyyyMMddHHmm')"
-$WorkspaceRoot  = "C:\Temp\ServerForge_E2E_$RunId"
-$AgentInstaller = (Resolve-Path ".\ServerForge\artifacts\installers\ServerForge-Agent-Setup.exe").Path
-$EvidenceOut    = "C:\Temp\ServerForge_E2E_Evidence_$RunId"
+$RunId = "e2e$(Get-Date -Format 'yyyyMMddHHmm')"
+$Workspace = "C:\Temp\ServerForge_E2E_$RunId"
+$AgentInstaller = ".\ServerForge\artifacts\installers\ServerForge-Agent-Setup.exe"
 
-try {
-    # Step 1: Preflight inventory & conflict check (read-only)
-    & .\ServerForge\scripts\e2e\preflight.ps1 `
-        -RunId $RunId -WorkspaceRoot $WorkspaceRoot -AgentPort 19443 -AppPort 15199
+# 1. Setup isolated Agent Windows Service + run preflight
+.\ServerForge\scripts\e2e\setup-disposable-iis.ps1 `
+    -RunId $RunId `
+    -AgentInstallerPath $AgentInstaller `
+    -WorkspaceRoot $Workspace `
+    -AgentPort 19443 `
+    -AppPort 15199 `
+    -GitHubAppPort 15200
 
-    # Step 2: Provision isolated ServerForge_E2E_<RunId> Agent Windows Service & manifest
-    & .\ServerForge\scripts\e2e\setup-disposable-iis.ps1 `
-        -RunId $RunId -AgentInstallerPath $AgentInstaller -WorkspaceRoot $WorkspaceRoot `
-        -AgentPort 19443 -AppPort 15199
+$Manifest = Join-Path $Workspace 'e2e-manifest.json'
 
-    $ManifestPath = Join-Path $WorkspaceRoot 'e2e-manifest.json'
+# 2. Execute TEST A (v1 -> v2 LOCAL TEST ARTIFACT + provenance negative check)
+.\ServerForge\scripts\e2e\run-deployment-tests.ps1 -ManifestPath $Manifest
 
-    # Step 3: Execute Phase 12D (mTLS pairing/restart), 12E (real IIS v1 deploy), & 12F (v2 update + duplicate prevention)
-    & .\ServerForge\scripts\e2e\run-deployment-tests.ps1 `
-        -ManifestPath $ManifestPath
-
-    # Step 4: Execute Phase 12G (SIMULATE_UNHEALTHY=true -> HTTP 503 -> automatic rollback -> data preservation -> anti-retry-loop)
-    & .\ServerForge\scripts\e2e\verify-rollback.ps1 `
-        -ManifestPath $ManifestPath
-}
-finally {
-    # Step 5 & 6: Collect sanitized diagnostics/Event Logs & remove ONLY ServerForge_E2E_<RunId> resources
-    & .\ServerForge\scripts\e2e\cleanup-disposable-iis.ps1 `
-        -WorkspaceRoot $WorkspaceRoot -PreserveDiagnosticsDir $EvidenceOut
-}
+# 3. Execute TEST A Rollback & Agent Restart Resilience (v3 HTTP 503 -> auto-rollback to v2)
+.\ServerForge\scripts\e2e\verify-rollback.ps1 -ManifestPath $Manifest
 ```
 
-Inspect `$EvidenceOut` for:
-- `preflight-inventory.json` (pre-existing IIS baseline)
-- `deployment-evidence.json` (mTLS pairing, IIS Site ID, v1/v2 HTTP status, commit SHAs, `/data` marker)
-- `rollback-evidence.json` (`SIMULATE_UNHEALTHY=true` detection, `RolledBack` state, restored v2 version & `/data` marker)
-- `iis-snapshot.json`, redacted `agent-*.log`, `windows-application-events.txt`, and `windows-system-events.txt`
+---
 
-## 4. Option B — Full Live GitHub Repository Autonomous Push-to-IIS Verification
-To verify autonomous GitHub Actions polling end-to-end with Desktop closed:
-1. Create a **disposable** GitHub repository (e.g., `<your-user>/serverforge-e2e-sample`) and push the contents of `/ServerForge/samples/disposable-test-app/` so `.github/workflows/serverforge-deploy.yml` sits at the repository root.
-2. Confirm GitHub Actions builds and uploads artifact `serverforge-sample-app-win-x64` (`app-release.zip` + `app-release.zip.sha256` with embedded `release-metadata.json`).
-3. Create a least-privilege Fine-Grained PAT scoped **only** to that disposable repository (`Contents: Read`, `Actions: Read`, `Metadata: Read`).
-4. Pair ServerForge Desktop (on Windows 11) with your disposable Windows Server VM Agent over private VPN (WireGuard/Tailscale), import the disposable repo, enable Auto-Deploy with explicit authorization, deploy v1, **exit ServerForge Desktop completely**, push commit v2 to `main`, and verify the Agent autonomously polls, verifies the artifact SHA-256 digest from the GitHub API, and updates IIS without Desktop running.
-5. Push a commit or set `SIMULATE_UNHEALTHY=true` and confirm automatic rollback restores v2 while preserving `/data`.
+## 3. Running TEST B — Genuine Autonomous GitHub Actions Deployment & Rollback
 
-## 5. Option C — Optional Manual GitHub Actions Workflow (`e2e-disposable-iis.yml`)
-Register a self-hosted GitHub Actions runner on your disposable Windows Server IIS VM with label `windows-iis-e2e` (never on a production host), then trigger **Actions -> Optional Disposable Windows IIS E2E Acceptance (Manual Only)** with:
-- `confirm_disposable_environment`: `true`
-- `runner_label`: `windows-iis-e2e`
-- `agent_port`: `19443`
-- `app_port`: `15199`
+TEST B makes **ZERO calls to `POST /api/v1/deployments/trigger`** and proves the real `GitHubAutoDeployWorker` autonomously polls GitHub, verifies workflow runs/artifacts/digests, deploys with Desktop closed, rolls back unhealthy releases, prevents infinite retry loops across Agent restarts, and recovers on a new healthy commit.
 
-Sanitized evidence and logs are automatically uploaded to artifact `serverforge-e2e-iis-evidence-<run_id>`, and only `ServerForge_E2E_gh<run_id>` resources are cleaned up.
+### Disposable Sample GitHub Repository Setup
+1. Create a **dedicated disposable GitHub repository** (e.g., `<your-user>/serverforge-e2e-sample-disposable`) — NEVER use a production repository.
+2. Copy the contents of `ServerForge/samples/disposable-test-app/` into the **root** of that disposable repository so that:
+   - `.github/workflows/serverforge-deploy.yml` is at the repository root.
+   - `ServerForge.SampleApp.csproj`, `Program.cs`, and `release-config.json` are at the repository root.
+3. Create a **test-only Fine-Grained Personal Access Token** scoped **ONLY** to that single disposable repository with:
+   - `Contents`: Read and write (so `run-github-autonomous-test.ps1` can push `v1`, `v2`, `v3-unhealthy`, and `v4-recovery` commits via GitHub Contents API without storing credentials in `.git/config`).
+   - `Actions`: Read-only (so `ServerForge.Agent` can verify completed workflow runs and download signed artifacts with server-reported SHA-256 digests).
+   - Never place production credentials or production certificates in the disposable repo or VM.
+
+### Execute TEST B on the Disposable IIS VM
+Run immediately after TEST A (reusing the same paired disposable Agent and `e2e-manifest.json`):
+
+```powershell
+# Keep token strictly in process memory (never logged, never saved to disk)
+$env:E2E_DISPOSABLE_GITHUB_PAT = Read-Host -Prompt 'Enter disposable repo Fine-Grained PAT'
+
+.\ServerForge\scripts\e2e\run-github-autonomous-test.ps1 `
+    -ManifestPath $Manifest `
+    -GitHubRepo '<your-user>/serverforge-e2e-sample-disposable' `
+    -GitHubBranch 'main'
+
+Remove-Item Env:\E2E_DISPOSABLE_GITHUB_PAT -ErrorAction SilentlyContinue
+```
+
+---
+
+## 4. Collect Sanitized Diagnostics & Clean Up Owned Resources
+
+Always run cleanup afterward (removes ONLY `ServerForge_E2E_<RunId>*` IIS sites, AppPools, Windows Service, and workspace while preserving pre-existing IIS sites and copying redacted evidence to `$EvidenceOut`):
+
+```powershell
+$EvidenceOut = "C:\Temp\ServerForge_E2E_Evidence_$RunId"
+.\ServerForge\scripts\e2e\cleanup-disposable-iis.ps1 `
+    -WorkspaceRoot $Workspace `
+    -PreserveDiagnosticsDir $EvidenceOut
+```
+
+Inspect `$EvidenceOut`:
+- `deployment-evidence.json` (TEST A evidence)
+- `rollback-evidence.json` (TEST A rollback & restart evidence)
+- `github-autonomous-evidence.json` (TEST B real GitHub run IDs, artifact IDs, commit SHAs, deployment IDs)
+- `preflight-inventory.json`, `iis-snapshot.json`, redacted `agent-*.log`, and Windows Event Log excerpts.
+
+---
+
+## 5. Optional Manual GitHub Actions Workflow (`e2e-disposable-iis.yml`)
+
+To run via GitHub Actions instead of RDP:
+1. Register your disposable Windows IIS VM as a **self-hosted GitHub Actions runner** with labels: `self-hosted`, `windows`, `disposable-windows-iis-e2e`.
+2. Create GitHub Environment `disposable-windows-iis-e2e` with **Required Reviewers** enabled, and add secret `E2E_DISPOSABLE_GITHUB_PAT` (only if running TEST B).
+3. Manually dispatch **Optional Disposable Windows IIS E2E Acceptance (Manual Only)** with:
+   - `confirm_disposable_environment = true`
+   - `runner_label = disposable-windows-iis-e2e` (note: `windows-latest` and any `prod`/`live` label are strictly rejected)
+   - `test_mode = test-a-local-iis-only` or `test-a-and-test-b-github-autonomous`
+   - `disposable_github_repo = <owner>/<disposable-repo>` (for TEST B)
+4. Approve the Environment deployment gate and download the uploaded `serverforge-e2e-iis-evidence-<run_id>` artifact for `E2E_ACCEPTANCE_REPORT.md`.

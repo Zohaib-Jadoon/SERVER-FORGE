@@ -1,14 +1,19 @@
 name: Build & Publish ServerForge Disposable Sample Artifact
 
+# Copy this workflow into the ROOT `.github/workflows/serverforge-deploy.yml`
+# of your dedicated disposable sample GitHub repository.
+# GitHub Actions packages `./publish-out/**` directly as the single signed workflow artifact ZIP
+# with an authoritative server-reported SHA-256 digest (`digest: sha256:...`).
+
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
     inputs:
       app_version:
-        description: 'Release version label embedded into release-metadata.json'
+        description: 'Optional release version label override (alphanumeric, dots, hyphens)'
         required: false
-        default: '1.0.0'
+        default: ''
 
 jobs:
   build-artifact:
@@ -24,6 +29,8 @@ jobs:
 
       - name: Publish Self-Contained Windows x64 Release
         shell: pwsh
+        env:
+          INPUT_APP_VERSION: ${{ inputs.app_version }}
         run: |
           $ErrorActionPreference = 'Stop'
           dotnet publish ServerForge.SampleApp.csproj `
@@ -33,36 +40,42 @@ jobs:
             -o ./publish-out
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $ver = if ([string]::IsNullOrWhiteSpace('${{ inputs.app_version }}')) {
-            "1.0.$env:GITHUB_RUN_NUMBER"
-          } else {
-            '${{ inputs.app_version }}'
+          $cfgVersion = ''
+          $cfgUnhealthy = $false
+          if (Test-Path ./release-config.json) {
+            $cfg = Get-Content ./release-config.json -Raw | ConvertFrom-Json
+            if ($null -ne $cfg.version) { $cfgVersion = [string]$cfg.version }
+            if ($null -ne $cfg.simulateUnhealthy) { $cfgUnhealthy = [bool]$cfg.simulateUnhealthy }
           }
+
+          $ver = if (-not [string]::IsNullOrWhiteSpace($env:INPUT_APP_VERSION)) {
+            if ($env:INPUT_APP_VERSION -notmatch '^[A-Za-z0-9._-]{1,40}$') {
+              throw 'Invalid app_version input.'
+            }
+            $env:INPUT_APP_VERSION
+          } elseif (-not [string]::IsNullOrWhiteSpace($cfgVersion)) {
+            $cfgVersion
+          } else {
+            "1.0.$env:GITHUB_RUN_NUMBER"
+          }
+
           $meta = [ordered]@{
-            version    = $ver
-            commitSha  = $env:GITHUB_SHA
-            runId      = $env:GITHUB_RUN_ID
-            builtAtUtc = (Get-Date).ToUniversalTime().ToString('O')
+            version           = $ver
+            commitSha         = $env:GITHUB_SHA
+            runId             = $env:GITHUB_RUN_ID
+            simulateUnhealthy = $cfgUnhealthy
+            builtAtUtc        = (Get-Date).ToUniversalTime().ToString('O')
           }
           $meta | ConvertTo-Json -Depth 4 | Set-Content -Path ./publish-out/release-metadata.json -Encoding UTF8
 
-      - name: Package Release ZIP & Verify SHA-256 Digest
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Compress-Archive -Path ./publish-out/* -DestinationPath ./app-release.zip -Force
-          if (-not (Test-Path ./app-release.zip) -or (Get-Item ./app-release.zip).Length -le 0) {
-            throw 'app-release.zip was missing or empty.'
+          if (-not (Test-Path ./publish-out/ServerForge.SampleApp.dll)) {
+            throw 'Expected published ServerForge.SampleApp.dll was not produced.'
           }
-          $hash = (Get-FileHash -Path ./app-release.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  app-release.zip" | Set-Content -Path ./app-release.zip.sha256 -Encoding ASCII
-          Write-Host "Verified artifact SHA-256: $hash (commit=$env:GITHUB_SHA)"
 
-      - name: Upload Verified Build Artifact
+      - name: Upload Verified Build Artifact (Flat Release Root)
         uses: actions/upload-artifact@v4
         with:
           name: serverforge-sample-app-win-x64
-          path: |
-            ./app-release.zip
-            ./app-release.zip.sha256
+          path: ./publish-out/**
+          if-no-files-found: error
           retention-days: 14

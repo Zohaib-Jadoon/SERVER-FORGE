@@ -7,6 +7,7 @@ var app = builder.Build();
 string? metaVersion = null;
 string? metaCommitSha = null;
 string? metaBuiltAtUtc = null;
+bool metaSimulateUnhealthy = false;
 var metadataPath = Path.Combine(AppContext.BaseDirectory, "release-metadata.json");
 if (File.Exists(metadataPath))
 {
@@ -19,6 +20,8 @@ if (File.Exists(metadataPath))
             metaCommitSha = c.GetString();
         if (doc.RootElement.TryGetProperty("builtAtUtc", out var b) && b.ValueKind == JsonValueKind.String)
             metaBuiltAtUtc = b.GetString();
+        if (doc.RootElement.TryGetProperty("simulateUnhealthy", out var u) && u.ValueKind == JsonValueKind.True)
+            metaSimulateUnhealthy = true;
     }
     catch
     {
@@ -52,10 +55,10 @@ app.MapGet("/", () => Results.Ok(new
 
 app.MapGet("/health", () =>
 {
-    var simulateUnhealthy = string.Equals(
-        Environment.GetEnvironmentVariable("SIMULATE_UNHEALTHY"),
-        "true",
-        StringComparison.OrdinalIgnoreCase);
+    var envUnhealthyRaw = Environment.GetEnvironmentVariable("SIMULATE_UNHEALTHY");
+    var simulateUnhealthy = string.IsNullOrWhiteSpace(envUnhealthyRaw)
+        ? metaSimulateUnhealthy
+        : string.Equals(envUnhealthyRaw, "true", StringComparison.OrdinalIgnoreCase);
 
     if (simulateUnhealthy)
     {

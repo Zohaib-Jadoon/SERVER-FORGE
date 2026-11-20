@@ -14,6 +14,35 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-DisposableHostIdentity {
+    $markerPath = 'C:\ProgramData\ServerForgeE2E\DISPOSABLE_IIS_E2E_HOST.marker'
+    $hasMarkerFile = (Test-Path $markerPath) -and ((Get-Content $markerPath -Raw) -match 'SERVERFORGE_DISPOSABLE_E2E_HOST=true')
+    $hasEnvMarker = [string]::Equals($env:SERVERFORGE_DISPOSABLE_E2E_HOST, 'true', [StringComparison]::OrdinalIgnoreCase)
+    return ($hasMarkerFile -or $hasEnvMarker)
+}
+
+function Assert-ValidE2EPort {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+    if ($Port -lt 1024 -or $Port -gt 65535) {
+        throw "SAFETY ABORT: Port '$Name' ($Port) must be between 1024 and 65535 (never port 80 or 443)."
+    }
+    if ($Port -eq 9443) {
+        throw "SAFETY ABORT: Port '$Name' cannot be 9443 (reserved for production ServerForge Agent)."
+    }
+}
+
+function Assert-ValidGitHubRepo {
+    param([Parameter(Mandatory = $true)][string]$Repo)
+    if ([string]::IsNullOrWhiteSpace($Repo) -or
+        $Repo.Contains('..') -or
+        $Repo -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$') {
+        throw "SAFETY ABORT: Invalid GitHub repository identifier '$Repo'. Expected strict 'owner/repository' format."
+    }
+}
+
 function Assert-OwnedE2EName {
     param(
         [Parameter(Mandatory = $true)][string]$ResourceName,
@@ -36,6 +65,7 @@ function Protect-SanitizedText {
     $clean = [regex]::Replace($clean, 'github_pat_[A-Za-z0-9_]+', '[REDACTED_GITHUB_PAT]')
     $clean = [regex]::Replace($clean, 'ghp_[A-Za-z0-9]+', '[REDACTED_GITHUB_PAT]')
     $clean = [regex]::Replace($clean, 'gho_[A-Za-z0-9]+', '[REDACTED_GITHUB_TOKEN]')
+    $clean = [regex]::Replace($clean, 'Bearer\s+[A-Za-z0-9_\-\.]+', 'Bearer [REDACTED]')
     $clean = [regex]::Replace($clean, '(?i)(Password|Pwd|Secret|Token|ApiKey)\s*=\s*[^;\r\n\s"]+', '$1=[REDACTED]')
     $clean = [regex]::Replace($clean, '(?i)(Pairing\s*Code\s*:\s*)[A-Z0-9\-]+', '$1[REDACTED_PAIRING_CODE]')
     foreach ($sec in $ExtraSecrets) {
@@ -50,9 +80,10 @@ function Write-E2ELog {
     param(
         [Parameter(Mandatory = $true)][string]$Message,
         [string]$Level = 'INFO',
-        [string]$LogFile = ''
+        [string]$LogFile = '',
+        [string[]]$ExtraSecrets = @()
     )
-    $safeMsg = Protect-SanitizedText -Text $Message
+    $safeMsg = Protect-SanitizedText -Text $Message -ExtraSecrets $ExtraSecrets
     $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')] [$Level] $safeMsg"
     Write-Host $line
     if (-not [string]::IsNullOrWhiteSpace($LogFile)) {
@@ -139,9 +170,10 @@ function New-E2EDesktopClientCertificate {
     $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor
              [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor
              [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+    $emptyPwd = [string]::Empty
 
     if (Test-Path $PfxPath) {
-        return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($PfxPath, $null, $flags)
+        return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($PfxPath, $emptyPwd, $flags)
     }
 
     $ecdsa = [System.Security.Cryptography.ECDsa]::Create([System.Security.Cryptography.ECCurve+NamedCurves]::nistP384)
@@ -157,7 +189,7 @@ function New-E2EDesktopClientCertificate {
         $notAfter = [DateTimeOffset]::UtcNow.AddDays(7)
         $ephemeral = $req.CreateSelfSigned($notBefore, $notAfter)
         try {
-            $pfxBytes = $ephemeral.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx)
+            $pfxBytes = $ephemeral.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $emptyPwd)
             [System.IO.File]::WriteAllBytes($PfxPath, $pfxBytes)
         }
         finally {
@@ -168,7 +200,7 @@ function New-E2EDesktopClientCertificate {
         $ecdsa.Dispose()
     }
 
-    return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($PfxPath, $null, $flags)
+    return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($PfxPath, $emptyPwd, $flags)
 }
 
 function ConvertTo-CertPem {
@@ -191,19 +223,42 @@ function Invoke-PinnedAgentRequest {
     Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
     $normalizedExpected = ($ExpectedServerThumbprint -replace '[:\s-]', '').ToUpperInvariant()
 
+    # PowerShell 7 (.NET Core / .NET 8+) supports HttpClientHandler.ServerCertificateCustomValidationCallback;
+    # Windows PowerShell 5.1 (.NET Framework 4.8) uses WebRequestHandler.ServerCertificateValidationCallback.
+    # Both enforce strict per-request fail-closed server certificate thumbprint pinning (NEVER disables global TLS).
     $handler = New-Object System.Net.Http.HttpClientHandler
-    $handler.ClientCertificateOptions = [System.Net.Http.ClientCertificateOption]::Manual
-    if ($null -ne $ClientCertificate) {
-        [void]$handler.ClientCertificates.Add($ClientCertificate)
+    if ($null -ne $handler.PSObject.Properties['ServerCertificateCustomValidationCallback']) {
+        $handler.ClientCertificateOptions = [System.Net.Http.ClientCertificateOption]::Manual
+        if ($null -ne $ClientCertificate) {
+            [void]$handler.ClientCertificates.Add($ClientCertificate)
+        }
+        $handler.ServerCertificateCustomValidationCallback = {
+            param($msg, $cert, $chain, $errors)
+            if ($null -eq $cert) { return $false }
+            $actual = ($cert.Thumbprint -replace '[:\s-]', '').ToUpperInvariant()
+            return [string]::Equals($actual, $normalizedExpected, [StringComparison]::OrdinalIgnoreCase)
+        }.GetNewClosure()
+    } else {
+        $handler.Dispose()
+        Add-Type -AssemblyName System.Net.Http.WebRequest -ErrorAction Stop
+        $handler = New-Object System.Net.Http.WebRequestHandler
+        $handler.ClientCertificateOptions = [System.Net.Http.ClientCertificateOption]::Manual
+        if ($null -ne $ClientCertificate) {
+            [void]$handler.ClientCertificates.Add($ClientCertificate)
+        }
+        $handler.ServerCertificateValidationCallback = [System.Net.Security.RemoteCertificateValidationCallback]{
+            param($senderObj, $cert, $chain, $sslErrors)
+            if ($null -eq $cert) { return $false }
+            $x509 = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cert)
+            try {
+                $actual = ($x509.Thumbprint -replace '[:\s-]', '').ToUpperInvariant()
+                return [string]::Equals($actual, $normalizedExpected, [StringComparison]::OrdinalIgnoreCase)
+            }
+            finally {
+                $x509.Dispose()
+            }
+        }.GetNewClosure()
     }
-
-    # Strict fail-closed server certificate thumbprint pinning — NEVER disables TLS validation
-    $handler.ServerCertificateCustomValidationCallback = {
-        param($msg, $cert, $chain, $errors)
-        if ($null -eq $cert) { return $false }
-        $actual = ($cert.Thumbprint -replace '[:\s-]', '').ToUpperInvariant()
-        return [string]::Equals($actual, $normalizedExpected, [StringComparison]::OrdinalIgnoreCase)
-    }.GetNewClosure()
 
     $http = New-Object System.Net.Http.HttpClient($handler)
     $http.BaseAddress = New-Object Uri($BaseUrl.TrimEnd('/') + '/')

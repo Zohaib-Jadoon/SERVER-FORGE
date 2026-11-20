@@ -212,17 +212,27 @@ public sealed class DeploymentAndPersistenceTests
             var orchestrator = new DeploymentOrchestrator(
                 [adapter], new PathBoundaryGuard(), new DpapiSecretProtector(), okHttp, NullLogger<DeploymentOrchestrator>.Instance);
 
-            var app = CreateStaticApp(tempRoot);
+            // 1. GitHubActionsArtifact without a server-side IGitHubArtifactProvenanceVerifier MUST fail closed
+            var ghApp = CreateStaticApp(tempRoot);
+            var unverifiedGhRes = await orchestrator.EnqueueAndExecuteAsync(
+                ghApp,
+                new TriggerDeploymentRequest(ghApp.Id, Commit1, "main", "Missing verifier", "dev", null, null, false, "test"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Failed, unverifiedGhRes.State);
+            Assert.Contains("IGitHubArtifactProvenanceVerifier", unverifiedGhRes.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+            Assert.Null(ghApp.ActiveReleasePath);
 
-            // Problem C: missing artifact MUST fail, never succeed
+            // 2. ManualSignedPackage with missing local archive MUST fail closed, never succeed
+            var manualApp = CreateStaticApp(tempRoot);
+            manualApp.SourceMode = DeploymentSourceMode.ManualSignedPackage;
             var missingRes = await orchestrator.EnqueueAndExecuteAsync(
-                app,
-                new TriggerDeploymentRequest(app.Id, Commit1, "main", "Missing art", "dev", null, null, false, "test"),
+                manualApp,
+                new TriggerDeploymentRequest(manualApp.Id, Commit1, "main", "Missing art", "dev", null, null, false, "test"),
                 new Dictionary<string, string>());
 
             Assert.Equal(DeploymentState.Failed, missingRes.State);
-            Assert.Contains("missing", missingRes.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
-            Assert.Null(app.ActiveReleasePath);
+            Assert.Contains("ManualSignedPackage", missingRes.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+            Assert.Null(manualApp.ActiveReleasePath);
         }
         finally
         {
@@ -249,18 +259,33 @@ public sealed class DeploymentAndPersistenceTests
                 .Callback<ManagedApplication, string, CancellationToken>((_, path, _) => activeIisPath = path)
                 .Returns(Task.CompletedTask);
 
+            var provenanceMock = new Mock<IGitHubArtifactProvenanceVerifier>();
+            provenanceMock.Setup(v => v.ResolveAndVerifyArtifactAsync(
+                    It.IsAny<ManagedApplication>(), "main", It.IsAny<string>(), It.IsAny<long?>(), It.IsAny<long?>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((ManagedApplication _, string _, string sha, long? reqRun, long? reqArt, CancellationToken _) =>
+                    new VerifiedGitHubArtifact(
+                        Verified: true,
+                        LocalZipPath: zipPath,
+                        TrustedSha256: trustedDigest,
+                        WorkflowRunId: reqRun ?? 1001,
+                        ArtifactId: reqArt ?? 5001,
+                        ArtifactName: $"rel-{sha[..6]}",
+                        TrustSource: $"GitHubActionsRun:{reqRun ?? 1001}/Artifact:{reqArt ?? 5001}",
+                        FailureReason: null));
+
             var healthStatus = HttpStatusCode.OK;
             var http = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(healthStatus)));
             var adapter = new StaticSiteDeploymentAdapter(ApplicationRuntimeType.StaticHtml, iisMock.Object);
             var orchestrator = new DeploymentOrchestrator(
-                [adapter], new PathBoundaryGuard(), new DpapiSecretProtector(), http, NullLogger<DeploymentOrchestrator>.Instance);
+                [adapter], new PathBoundaryGuard(), new DpapiSecretProtector(), http, NullLogger<DeploymentOrchestrator>.Instance,
+                provenanceVerifier: provenanceMock.Object);
 
             var app = CreateStaticApp(tempRoot);
 
-            // 1. First deployment succeeds
+            // 1. First deployment succeeds via server-side provenance verifier (no caller-supplied local path)
             var first = await orchestrator.EnqueueAndExecuteAsync(
                 app,
-                new TriggerDeploymentRequest(app.Id, Commit1, "main", "v1", "dev", zipPath, trustedDigest, false, "test", 1001, 5001, "rel-1", "GitHubActions"),
+                new TriggerDeploymentRequest(app.Id, Commit1, "main", "v1", "dev", null, trustedDigest, false, "test", 1001, 5001, "rel-1", "GitHubActions"),
                 new Dictionary<string, string>());
             Assert.Equal(DeploymentState.Successful, first.State);
             var release1 = app.ActiveReleasePath!;
@@ -270,7 +295,7 @@ public sealed class DeploymentAndPersistenceTests
             await Task.Delay(1100);
             var second = await orchestrator.EnqueueAndExecuteAsync(
                 app,
-                new TriggerDeploymentRequest(app.Id, Commit2, "main", "v2", "dev", zipPath, trustedDigest, false, "test", 1002, 5002, "rel-2", "GitHubActions"),
+                new TriggerDeploymentRequest(app.Id, Commit2, "main", "v2", "dev", null, trustedDigest, false, "test", 1002, 5002, "rel-2", "GitHubActions"),
                 new Dictionary<string, string>());
             Assert.Equal(DeploymentState.Successful, second.State);
             var release2 = app.ActiveReleasePath!;
@@ -281,7 +306,7 @@ public sealed class DeploymentAndPersistenceTests
             healthStatus = HttpStatusCode.ServiceUnavailable;
             var third = await orchestrator.EnqueueAndExecuteAsync(
                 app,
-                new TriggerDeploymentRequest(app.Id, Commit3, "main", "v3 broken", "dev", zipPath, trustedDigest, false, "test", 1003, 5003, "rel-3", "GitHubActions"),
+                new TriggerDeploymentRequest(app.Id, Commit3, "main", "v3 broken", "dev", null, trustedDigest, false, "test", 1003, 5003, "rel-3", "GitHubActions"),
                 new Dictionary<string, string>());
             Assert.Equal(DeploymentState.RolledBack, third.State);
             Assert.Equal(release2, app.ActiveReleasePath);
@@ -1278,6 +1303,126 @@ public sealed class DeploymentAndPersistenceTests
             Assert.False(mismatchRes.Found);
             Assert.Contains("mismatch", mismatchRes.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
             Assert.False(File.Exists(mismatchZipPath));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DeploymentOrchestrator_GitHubActionsMode_RejectsLocalPath_UntrustedUrl_ForgedIds_AndDigestMismatch()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-prov-sec-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var zipPath = Path.Combine(tempRoot, "attacker-local.zip");
+        CreateSampleStaticZip(zipPath, "<html><body>forged</body></html>");
+        var localHash = await SafeProcessRunner.ComputeFileSha256Async(zipPath);
+
+        try
+        {
+            var iisMock = new Mock<IIisManager>();
+            var adapter = new StaticSiteDeploymentAdapter(ApplicationRuntimeType.StaticHtml, iisMock.Object);
+            var okHttp = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)));
+
+            var verifierMock = new Mock<IGitHubArtifactProvenanceVerifier>();
+            verifierMock.Setup(v => v.ResolveAndVerifyArtifactAsync(
+                    It.IsAny<ManagedApplication>(), "main", Commit1, 999999, 888888, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new VerifiedGitHubArtifact(false, null, null, null, null, null, null, "Workflow run provenance mismatch."));
+            verifierMock.Setup(v => v.ResolveAndVerifyArtifactAsync(
+                    It.IsAny<ManagedApplication>(), "main", Commit2, 2001, 3001, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new VerifiedGitHubArtifact(true, zipPath, localHash, 2001, 3001, "pkg", "GitHubActionsRun:2001/Artifact:3001", null));
+
+            var orchestrator = new DeploymentOrchestrator(
+                [adapter], new PathBoundaryGuard(), new DpapiSecretProtector(), okHttp, NullLogger<DeploymentOrchestrator>.Instance,
+                provenanceVerifier: verifierMock.Object);
+
+            var ghApp = CreateStaticApp(tempRoot);
+            ghApp.SourceMode = DeploymentSourceMode.GitHubActionsArtifact;
+
+            // 1. Caller supplies local file path in GitHubActionsArtifact mode -> MUST fail closed
+            var localPathAttempt = await orchestrator.EnqueueAndExecuteAsync(
+                ghApp,
+                new TriggerDeploymentRequest(ghApp.Id, Commit1, "main", "forged local", "attacker", zipPath, localHash, false, "api", 120001, 120001, "fake", "GitHubActions"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Failed, localPathAttempt.State);
+            Assert.Contains("rejects caller-supplied", localPathAttempt.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 2. Caller supplies untrusted remote URL in GitHubActionsArtifact mode -> MUST fail closed
+            var untrustedUrlAttempt = await orchestrator.EnqueueAndExecuteAsync(
+                ghApp,
+                new TriggerDeploymentRequest(ghApp.Id, Commit1, "main", "forged url", "attacker", "https://evil.example.com/payload.zip", localHash, false, "api", 120001, 120001, "fake", "GitHubActions"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Failed, untrustedUrlAttempt.State);
+
+            // 3. Caller supplies forged workflow/artifact IDs -> verifier rejects -> MUST fail closed
+            var forgedIdsAttempt = await orchestrator.EnqueueAndExecuteAsync(
+                ghApp,
+                new TriggerDeploymentRequest(ghApp.Id, Commit1, "main", "forged ids", "attacker", null, localHash, false, "api", 999999, 888888, "fake", "GitHubActions"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Failed, forgedIdsAttempt.State);
+            Assert.Contains("provenance", forgedIdsAttempt.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 4. Caller supplies mismatched SHA-256 against verified GitHub API digest -> MUST fail closed
+            var badDigestAttempt = await orchestrator.EnqueueAndExecuteAsync(
+                ghApp,
+                new TriggerDeploymentRequest(ghApp.Id, Commit2, "main", "bad digest", "attacker", null, new string('0', 64), false, "api", 2001, 3001, "pkg", "GitHubActions"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Failed, badDigestAttempt.State);
+            Assert.Contains("does not match", badDigestAttempt.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 5. ManualSignedPackage rejects remote URLs and non-64-char hashes, succeeds only for hash-verified local package
+            var manualApp = CreateStaticApp(tempRoot);
+            manualApp.SourceMode = DeploymentSourceMode.ManualSignedPackage;
+            var remoteManualAttempt = await orchestrator.EnqueueAndExecuteAsync(
+                manualApp,
+                new TriggerDeploymentRequest(manualApp.Id, Commit1, "main", "remote manual", "op", "https://evil.example.com/pkg.zip", localHash, false, "op"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Failed, remoteManualAttempt.State);
+
+            var shortHashAttempt = await orchestrator.EnqueueAndExecuteAsync(
+                manualApp,
+                new TriggerDeploymentRequest(manualApp.Id, Commit1, "main", "short hash", "op", zipPath, "deadbeef", false, "op"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Failed, shortHashAttempt.State);
+
+            iisMock.Verify(m => m.SwitchSitePhysicalPathAsync(It.IsAny<ManagedApplication>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task GitHubApiClient_RejectsUntrustedArtifactDownloadHost_AndNonHttpsUrls()
+    {
+        Assert.True(GitHubApiClient.IsTrustedGitHubArtifactUrl("https://api.github.com/repos/owner/repo/actions/artifacts/42/zip"));
+        Assert.False(GitHubApiClient.IsTrustedGitHubArtifactUrl("http://api.github.com/repos/owner/repo/actions/artifacts/42/zip"));
+        Assert.False(GitHubApiClient.IsTrustedGitHubArtifactUrl("https://evil.example.com/repos/owner/repo/actions/artifacts/42/zip"));
+        Assert.False(GitHubApiClient.IsTrustedGitHubArtifactUrl("file:///C:/temp/payload.zip"));
+        Assert.False(GitHubApiClient.IsTrustedGitHubArtifactUrl(@"C:\temp\payload.zip"));
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-gh-host-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var evilHostClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":904,"conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"artifacts":[{"id":99,"name":"app","expired":false,"size_in_bytes":64,"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","archive_download_url":"https://evil.example.com/dl/99"}]}""") };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+
+            var destPath = Path.Combine(tempRoot, "blocked.zip");
+            var res = await evilHostClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", destPath, CancellationToken.None);
+            Assert.False(res.Found);
+            Assert.Contains("untrusted", res.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(destPath));
         }
         finally
         {

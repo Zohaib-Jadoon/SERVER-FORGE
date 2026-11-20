@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
-    Phase 12B Owned-Only Disposable IIS & Agent Cleanup Script.
+    Phase 12.1 Owned-Only Disposable IIS & Agent Cleanup Script.
 .DESCRIPTION
-    Removes ONLY resources listed in e2e-manifest.json whose names begin with ServerForge_E2E_<RunId>.
+    Removes ONLY resources listed in e2e-manifest.json whose names begin with ServerForge_E2E_<RunId>
+    (covering both TEST A and optional TEST B disposable IIS sites and AppPools).
     Preserves all pre-existing IIS sites, AppPools, and diagnostics bundles (if -PreserveDiagnosticsDir is set).
     Exits non-zero if cleanup fails while retaining diagnostics for inspection.
 #>
@@ -29,10 +30,22 @@ $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
 $namespace = [string]$manifest.namespace
 $preflight = if (Test-Path $manifest.preflightInventory) { Get-Content $manifest.preflightInventory -Raw | ConvertFrom-Json } else { $null }
 
+$ownedSites = New-Object System.Collections.Generic.List[string]
+$ownedPools = New-Object System.Collections.Generic.List[string]
+$ownedSites.Add([string]$manifest.iisSiteName)
+$ownedPools.Add([string]$manifest.iisAppPoolName)
+
+if ($null -ne $manifest.PSObject.Properties['ghIisSiteName'] -and -not [string]::IsNullOrWhiteSpace([string]$manifest.ghIisSiteName)) {
+    $ownedSites.Add([string]$manifest.ghIisSiteName)
+}
+if ($null -ne $manifest.PSObject.Properties['ghIisAppPoolName'] -and -not [string]::IsNullOrWhiteSpace([string]$manifest.ghIisAppPoolName)) {
+    $ownedPools.Add([string]$manifest.ghIisAppPoolName)
+}
+
 # Strict ownership validation before touching ANY resource
-Assert-OwnedE2EName -ResourceName $manifest.iisSiteName -ExpectedPrefix $namespace
-Assert-OwnedE2EName -ResourceName $manifest.iisAppPoolName -ExpectedPrefix $namespace
-Assert-OwnedE2EName -ResourceName $manifest.agentServiceName -ExpectedPrefix $namespace
+foreach ($sn in $ownedSites) { Assert-OwnedE2EName -ResourceName $sn -ExpectedPrefix $namespace }
+foreach ($pn in $ownedPools) { Assert-OwnedE2EName -ResourceName $pn -ExpectedPrefix $namespace }
+Assert-OwnedE2EName -ResourceName ([string]$manifest.agentServiceName) -ExpectedPrefix $namespace
 
 # Preserve diagnostics bundle outside WorkspaceRoot if requested
 if (-not [string]::IsNullOrWhiteSpace($PreserveDiagnosticsDir)) {
@@ -42,21 +55,25 @@ if (-not [string]::IsNullOrWhiteSpace($PreserveDiagnosticsDir)) {
 $cleanupErrors = New-Object System.Collections.Generic.List[string]
 $appCmd = Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
 
-# 1. Remove ONLY the owned disposable IIS site & AppPool
+# 1. Remove ONLY the owned disposable IIS sites & AppPools
 if (Test-Path $appCmd) {
-    $siteExists = & $appCmd list site $manifest.iisSiteName 2>$null
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($siteExists -join ''))) {
-        & $appCmd stop site $manifest.iisSiteName 2>$null | Out-Null
-        & $appCmd delete site $manifest.iisSiteName | Out-Null
-        if ($LASTEXITCODE -ne 0) { $cleanupErrors.Add("Failed to delete disposable IIS site '$($manifest.iisSiteName)'.") }
+    foreach ($sn in $ownedSites) {
+        $siteExists = & $appCmd list site $sn 2>$null
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($siteExists -join ''))) {
+            & $appCmd stop site $sn 2>$null | Out-Null
+            & $appCmd delete site $sn | Out-Null
+            if ($LASTEXITCODE -ne 0) { $cleanupErrors.Add("Failed to delete disposable IIS site '$sn'.") }
+        }
     }
 
-    $poolExists = & $appCmd list apppool $manifest.iisAppPoolName 2>$null
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($poolExists -join ''))) {
-        & $appCmd stop apppool $manifest.iisAppPoolName 2>$null | Out-Null
-        Start-Sleep -Milliseconds 500
-        & $appCmd delete apppool $manifest.iisAppPoolName | Out-Null
-        if ($LASTEXITCODE -ne 0) { $cleanupErrors.Add("Failed to delete disposable IIS AppPool '$($manifest.iisAppPoolName)'.") }
+    foreach ($pn in $ownedPools) {
+        $poolExists = & $appCmd list apppool $pn 2>$null
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($poolExists -join ''))) {
+            & $appCmd stop apppool $pn 2>$null | Out-Null
+            Start-Sleep -Milliseconds 500
+            & $appCmd delete apppool $pn | Out-Null
+            if ($LASTEXITCODE -ne 0) { $cleanupErrors.Add("Failed to delete disposable IIS AppPool '$pn'.") }
+        }
     }
 }
 
@@ -67,7 +84,7 @@ if ($null -ne $svc) {
     $uninsExe = Get-ChildItem -Path $manifest.agentInstallDir -Filter 'unins*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -ne $uninsExe) {
         $uLog = Join-Path ([System.IO.Path]::GetTempPath()) ("sf-e2e-agent-unins-$($manifest.runId).log")
-        $p = Start-Process -FilePath $uninsExe.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$uLog`"") -WorkingDirectory $env:TEMP -Wait -PassThru
+        [void](Start-Process -FilePath $uninsExe.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$uLog`"") -WorkingDirectory $env:TEMP -Wait -PassThru)
         [void](Wait-E2ECondition -Condition { $null -eq (Get-Service -Name $manifest.agentServiceName -ErrorAction SilentlyContinue) } -TimeoutSeconds 25)
     }
     if ($null -ne (Get-Service -Name $manifest.agentServiceName -ErrorAction SilentlyContinue)) {

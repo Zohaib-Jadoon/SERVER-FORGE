@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-    Phase 12B Disposable IIS & Agent Environment Setup (ServerForge_E2E_<RunId>).
+    Phase 12.1 Disposable IIS & Agent Environment Setup (ServerForge_E2E_<RunId>).
 .DESCRIPTION
     Creates ONLY test-owned disposable resources inside an isolated workspace:
     - Installs isolated ServerForge Agent Windows Service (ServerForge_E2E_<RunId>_Agent)
       bound exclusively to 127.0.0.1:<AgentPort> with isolated DataRoot & AppsRoot.
-    - Writes ownership manifest e2e-manifest.json used by run/rollback/cleanup scripts.
+    - Writes ownership manifest e2e-manifest.json for both TEST A (local IIS artifact)
+      and TEST B (genuine autonomous GitHub Actions polling).
     - Never modifies pre-existing IIS sites, AppPools, or production ServerForge directories.
 #>
 [CmdletBinding()]
@@ -17,6 +18,7 @@ param(
     [string]$WorkspaceRoot = '',
     [int]$AgentPort = 19443,
     [int]$AppPort = 15199,
+    [int]$GitHubAppPort = 15200,
     [switch]$AllowProductionHostOverride
 )
 
@@ -43,6 +45,7 @@ $preflightArgs = @{
     WorkspaceRoot = $WorkspaceRoot
     AgentPort     = $AgentPort
     AppPort       = $AppPort
+    GitHubAppPort = $GitHubAppPort
 }
 if ($AllowProductionHostOverride) { $preflightArgs['AllowProductionHostOverride'] = $true }
 & (Join-Path $PSScriptRoot 'preflight.ps1') @preflightArgs
@@ -65,12 +68,16 @@ foreach ($d in @($diagDir, $agentInstallDir, $agentDataRoot, $agentAppsRoot, $de
 $agentSvcName = "${namespace}_Agent"
 $iisSiteName = $namespace
 $iisPoolName = "${namespace}_Pool"
+$ghIisSiteName = "${namespace}_GH"
+$ghIisPoolName = "${namespace}_GH_Pool"
+
 Assert-OwnedE2EName -ResourceName $agentSvcName -ExpectedPrefix $namespace
 Assert-OwnedE2EName -ResourceName $iisSiteName -ExpectedPrefix $namespace
 Assert-OwnedE2EName -ResourceName $iisPoolName -ExpectedPrefix $namespace
+Assert-OwnedE2EName -ResourceName $ghIisSiteName -ExpectedPrefix $namespace
+Assert-OwnedE2EName -ResourceName $ghIisPoolName -ExpectedPrefix $namespace
 
-# 2. Pre-seed isolated appsettings.json BEFORE silent install so ServerForge-Agent-Setup.exe preserves it (onlyifdoesntexist)
-#    and starts the disposable Agent bound strictly to 127.0.0.1:<AgentPort> with isolated DataRoot & AppsRoot!
+# 2. Pre-seed isolated appsettings.json BEFORE silent install so ServerForge-Agent-Setup.exe preserves it
 $appSettingsPath = Join-Path $agentInstallDir 'appsettings.json'
 $agentConfig = [ordered]@{
     Agent = [ordered]@{
@@ -79,7 +86,7 @@ $agentConfig = [ordered]@{
         Port                       = $AgentPort
         DataRoot                   = $agentDataRoot
         AppsRoot                   = $agentAppsRoot
-        GitHubPollIntervalSeconds  = 20
+        GitHubPollIntervalSeconds  = 15
         RequireVpnOrPrivateNetwork = $true
     }
     Serilog = [ordered]@{
@@ -89,7 +96,7 @@ $agentConfig = [ordered]@{
     }
 }
 $agentConfig | ConvertTo-Json -Depth 6 | Set-Content -Path $appSettingsPath -Encoding UTF8
-Write-E2ELog "Wrote isolated Agent appsettings.json at $appSettingsPath (127.0.0.1:$AgentPort, DataRoot=$agentDataRoot, AppsRoot=$agentAppsRoot)" 'INFO' $logFile
+Write-E2ELog "Wrote isolated Agent appsettings.json at $appSettingsPath (127.0.0.1:$AgentPort, Poll=15s)" 'INFO' $logFile
 
 # 3. Install disposable Agent Windows Service via Inno Setup with absolute /LOG path
 $installLog = Join-Path $diagDir 'agent-e2e-install.log'
@@ -138,25 +145,30 @@ foreach ($ep in $listeners) {
 
 # 5. Write ownership manifest (NO secrets, NO pairing codes)
 $manifest = [ordered]@{
-    schemaVersion      = 1
-    createdAtUtc       = (Get-Date).ToUniversalTime().ToString('O')
-    runId              = $safeRunId
-    namespace          = $namespace
-    workspaceRoot      = $WorkspaceRoot
-    diagnosticsDir     = $diagDir
-    agentInstallDir    = $agentInstallDir
-    agentDataRoot      = $agentDataRoot
-    agentAppsRoot      = $agentAppsRoot
-    desktopIdentityDir = $desktopSimDir
-    artifactsDir       = $artifactsDir
-    agentServiceName   = $agentSvcName
-    agentBaseUrl       = "https://127.0.0.1:$AgentPort"
-    agentPort          = $AgentPort
-    iisSiteName        = $iisSiteName
-    iisAppPoolName     = $iisPoolName
-    appBaseUrl         = "http://127.0.0.1:$AppPort"
-    appPort            = $AppPort
-    preflightInventory = (Join-Path $WorkspaceRoot 'preflight-inventory.json')
+    schemaVersion           = 2
+    createdAtUtc            = (Get-Date).ToUniversalTime().ToString('O')
+    runId                   = $safeRunId
+    namespace               = $namespace
+    workspaceRoot           = $WorkspaceRoot
+    diagnosticsDir          = $diagDir
+    agentInstallDir         = $agentInstallDir
+    agentDataRoot           = $agentDataRoot
+    agentAppsRoot           = $agentAppsRoot
+    desktopIdentityDir      = $desktopSimDir
+    artifactsDir            = $artifactsDir
+    agentServiceName        = $agentSvcName
+    agentBaseUrl            = "https://127.0.0.1:$AgentPort"
+    agentPort               = $AgentPort
+    agentPollIntervalSec    = 15
+    iisSiteName             = $iisSiteName
+    iisAppPoolName          = $iisPoolName
+    appBaseUrl              = "http://127.0.0.1:$AppPort"
+    appPort                 = $AppPort
+    ghIisSiteName           = $ghIisSiteName
+    ghIisAppPoolName        = $ghIisPoolName
+    ghAppBaseUrl            = "http://127.0.0.1:$GitHubAppPort"
+    ghAppPort               = $GitHubAppPort
+    preflightInventory      = (Join-Path $WorkspaceRoot 'preflight-inventory.json')
 }
 $manifestPath = Join-Path $WorkspaceRoot 'e2e-manifest.json'
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8

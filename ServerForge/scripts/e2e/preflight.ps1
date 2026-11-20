@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Phase 12B Preflight Inventory & Safety Validator for Disposable Windows IIS E2E Tests.
+    Phase 12.1 Preflight Inventory & Safety Validator for Disposable Windows IIS E2E Tests.
 .DESCRIPTION
-    Verifies Administrator privileges, Windows IIS + AspNetCoreModuleV2 availability,
-    inventories pre-existing IIS sites/AppPools/ports, and aborts if production ServerForge
-    services or conflicting unmanaged resources are detected. NEVER installs Windows roles
-    or alters host-wide IIS settings.
+    Verifies Administrator privileges, positive disposable test-environment host identity,
+    Windows IIS + AspNetCoreModuleV2 availability, inventories pre-existing IIS sites/AppPools/ports,
+    and aborts if production ServerForge services or conflicting unmanaged resources are detected.
+    NEVER installs Windows roles or alters host-wide IIS settings.
 #>
 [CmdletBinding()]
 param(
@@ -14,6 +14,7 @@ param(
     [string]$WorkspaceRoot = '',
     [int]$AgentPort = 19443,
     [int]$AppPort = 15199,
+    [int]$GitHubAppPort = 15200,
     [switch]$AllowProductionHostOverride
 )
 
@@ -27,6 +28,13 @@ if ([string]::IsNullOrWhiteSpace($safeRunId)) {
     throw 'RunId must contain at least one alphanumeric character.'
 }
 
+Assert-ValidE2EPort -Name 'AgentPort' -Port $AgentPort
+Assert-ValidE2EPort -Name 'AppPort' -Port $AppPort
+Assert-ValidE2EPort -Name 'GitHubAppPort' -Port $GitHubAppPort
+if ($AgentPort -eq $AppPort -or $AgentPort -eq $GitHubAppPort -or $AppPort -eq $GitHubAppPort) {
+    throw "SAFETY ABORT: AgentPort ($AgentPort), AppPort ($AppPort), and GitHubAppPort ($GitHubAppPort) must all be distinct."
+}
+
 $namespace = "ServerForge_E2E_$safeRunId"
 if ([string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
     $WorkspaceRoot = Join-Path 'C:\Temp' $namespace
@@ -36,7 +44,7 @@ $diagDir = Join-Path $WorkspaceRoot 'diagnostics'
 New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
 $logFile = Join-Path $diagDir 'preflight.log'
 
-Write-E2ELog "=== Phase 12 Preflight Check ($namespace) ===" 'INFO' $logFile
+Write-E2ELog "=== Phase 12.1 Preflight Check ($namespace) ===" 'INFO' $logFile
 
 $failures = New-Object System.Collections.Generic.List[string]
 
@@ -48,10 +56,14 @@ if (-not (Test-IsAdministrator)) {
     $failures.Add('Administrator privileges are required to manage disposable IIS sites and Windows Services.')
 }
 
-# 2. Production ServerForge protection guard
+# 2. Positive disposable host identity & production ServerForge protection guard
+$isDisposableHost = Test-DisposableHostIdentity
 $prodAgentSvc = Get-Service -Name 'ServerForgeAgent' -ErrorAction SilentlyContinue
 $prodIdentity = 'C:\ProgramData\ServerForge\Agent\agent-identity.json'
 if (-not $AllowProductionHostOverride) {
+    if (-not $isDisposableHost) {
+        $failures.Add("SAFETY ABORT: Host '$env:COMPUTERNAME' lacks a positive disposable E2E marker. On a dedicated non-production IIS test VM, create 'C:\ProgramData\ServerForgeE2E\DISPOSABLE_IIS_E2E_HOST.marker' containing 'SERVERFORGE_DISPOSABLE_E2E_HOST=true' (or set env var SERVERFORGE_DISPOSABLE_E2E_HOST=true).")
+    }
     if ($null -ne $prodAgentSvc) {
         $failures.Add("SAFETY ABORT: Production Windows Service 'ServerForgeAgent' (Status=$($prodAgentSvc.Status)) already exists on this host. Refusing E2E execution on a production host.")
     }
@@ -88,22 +100,24 @@ if ([string]::IsNullOrWhiteSpace($dotnetVersion)) {
     $failures.Add('.NET SDK (dotnet) not found in PATH.')
 }
 
-# 5. Pre-existing IIS inventory & conflict detection
+# 5. Pre-existing IIS inventory & conflict detection (both TEST A and TEST B resources)
 $existingSites = @(Get-IisSitesSnapshot)
 $existingPools = @(Get-IisAppPoolsSnapshot)
 
 $proposedSiteName = $namespace
 $proposedPoolName = "${namespace}_Pool"
+$proposedGhSiteName = "${namespace}_GH"
+$proposedGhPoolName = "${namespace}_GH_Pool"
 $proposedSvcName = "${namespace}_Agent"
 
 foreach ($s in $existingSites) {
-    if ($s.Name -eq $proposedSiteName) {
-        $failures.Add("CONFLICT: IIS site '$proposedSiteName' already exists.")
+    if ($s.Name -eq $proposedSiteName -or $s.Name -eq $proposedGhSiteName) {
+        $failures.Add("CONFLICT: IIS site '$($s.Name)' already exists.")
     }
 }
 foreach ($p in $existingPools) {
-    if ($p.Name -eq $proposedPoolName) {
-        $failures.Add("CONFLICT: IIS AppPool '$proposedPoolName' already exists.")
+    if ($p.Name -eq $proposedPoolName -or $p.Name -eq $proposedGhPoolName) {
+        $failures.Add("CONFLICT: IIS AppPool '$($p.Name)' already exists.")
     }
 }
 if ($null -ne (Get-Service -Name $proposedSvcName -ErrorAction SilentlyContinue)) {
@@ -113,7 +127,10 @@ if (Test-TcpPortInUse -Port $AgentPort) {
     $failures.Add("CONFLICT: Proposed disposable Agent loopback port $AgentPort is already in use.")
 }
 if (Test-TcpPortInUse -Port $AppPort) {
-    $failures.Add("CONFLICT: Proposed disposable IIS app port $AppPort is already in use.")
+    $failures.Add("CONFLICT: Proposed disposable IIS TEST A port $AppPort is already in use.")
+}
+if (Test-TcpPortInUse -Port $GitHubAppPort) {
+    $failures.Add("CONFLICT: Proposed disposable IIS TEST B port $GitHubAppPort is already in use.")
 }
 
 $inventory = [ordered]@{
@@ -123,6 +140,7 @@ $inventory = [ordered]@{
     namespace               = $namespace
     workspaceRoot           = $WorkspaceRoot
     isAdministrator         = (Test-IsAdministrator)
+    disposableHostVerified  = $isDisposableHost
     iisInstalled            = $iisInstalled
     w3svcRunning            = $w3svcRunning
     aspNetCoreModuleV2Found = $ancmInstalled
@@ -130,11 +148,14 @@ $inventory = [ordered]@{
     proposedResources       = [ordered]@{
         iisSiteName      = $proposedSiteName
         iisAppPoolName   = $proposedPoolName
+        ghIisSiteName    = $proposedGhSiteName
+        ghIisAppPoolName = $proposedGhPoolName
         agentServiceName = $proposedSvcName
         agentBindAddress = '127.0.0.1'
         agentPort        = $AgentPort
         appBindAddress   = '127.0.0.1'
         appPort          = $AppPort
+        ghAppPort        = $GitHubAppPort
     }
     preExistingIisSites     = $existingSites
     preExistingAppPools     = $existingPools

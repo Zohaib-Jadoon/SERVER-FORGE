@@ -20,6 +20,7 @@ using Microsoft.Extensions.Options;
 using Moq;
 using ServerForge.Agent;
 using ServerForge.Agent.Configuration;
+using ServerForge.Agent.Security;
 using ServerForge.Agent.Workers;
 using ServerForge.Contracts.Dtos;
 using ServerForge.Contracts.Enums;
@@ -322,7 +323,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 WorkingDirectory: ".",
                 AutoDeployEnabled: true,
                 RepositoryExplicitlyAuthorized: true,
-                SourceMode: DeploymentSourceMode.GitHubActionsArtifact,
+                SourceMode: DeploymentSourceMode.ManualSignedPackage,
                 GitHubWorkflowFileName: "serverforge-deploy.yml",
                 BuildCommand: "",
                 StartCommand: "",
@@ -340,7 +341,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
 
             using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
 
-            // 1. Deploy v1 healthy
+            // 1. Deploy v1 healthy (explicitly labeled LOCAL TEST ARTIFACT via ManualSignedPackage)
             await transport.ConfigureEnvVarsAsync(server, registered!.Id, new ConfigureEnvVarsRequest(
                 EnvironmentTier.Production,
                 [
@@ -350,7 +351,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 ]), CancellationToken.None);
 
             var dep1 = await transport.TriggerDeploymentAsync(server, new TriggerDeploymentRequest(
-                registered.Id, CommitV1, "main", "Initial healthy release", "ci", v1Zip, v1Sha, false, "e2e", 101, 201, "v1", "GitHubActions"), CancellationToken.None);
+                registered.Id, CommitV1, "main", "Initial healthy release", "ci", v1Zip, v1Sha, false, "e2e", null, null, "v1", "LOCAL TEST ARTIFACT (ManualSignedPackage)"), CancellationToken.None);
             Assert.NotNull(dep1);
             Assert.Equal(DeploymentState.Successful, dep1!.State);
 
@@ -371,7 +372,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 ]), CancellationToken.None);
 
             var dep2 = await transport.TriggerDeploymentAsync(server, new TriggerDeploymentRequest(
-                registered.Id, CommitV2, "main", "Healthy v2 update", "ci", v2Zip, v2Sha, false, "e2e", 102, 202, "v2", "GitHubActions"), CancellationToken.None);
+                registered.Id, CommitV2, "main", "Healthy v2 update", "ci", v2Zip, v2Sha, false, "e2e", null, null, "v2", "LOCAL TEST ARTIFACT (ManualSignedPackage)"), CancellationToken.None);
             Assert.NotNull(dep2);
             Assert.Equal(DeploymentState.Successful, dep2!.State);
 
@@ -391,7 +392,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 ]), CancellationToken.None);
 
             var dep3 = await transport.TriggerDeploymentAsync(server, new TriggerDeploymentRequest(
-                registered.Id, CommitV3Broken, "main", "Unhealthy release", "ci", v3Zip, v3Sha, false, "e2e", 103, 203, "v3", "GitHubActions"), CancellationToken.None);
+                registered.Id, CommitV3Broken, "main", "Unhealthy release", "ci", v3Zip, v3Sha, false, "e2e", null, null, "v3", "LOCAL TEST ARTIFACT (ManualSignedPackage)"), CancellationToken.None);
             Assert.NotNull(dep3);
             Assert.Equal(DeploymentState.RolledBack, dep3!.State);
 
@@ -632,6 +633,204 @@ public sealed class AutonomousDeploymentAndRollbackTests
         finally
         {
             SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LiveMtls_GitHubActionsMode_RejectsSpoofedLocalArtifact_ForgedIds_AndSpoofedAutoDeployFlag()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"sf-prov-mtls-{Guid.NewGuid():N}");
+        var agentData = Path.Combine(root, "agent-data");
+        var agentApps = Path.Combine(root, "agent-apps");
+        var desktopData = Path.Combine(root, "desktop-data");
+        var artifactsDir = Path.Combine(root, "artifacts");
+
+        try
+        {
+            await using var targetHost = await LiveLoopbackTargetHost.StartAsync();
+            var (v1Zip, v1Sha) = await CreateAspNetCoreSampleArtifactAsync(artifactsDir, "gh-v1.zip", "2.0.0-gh", CommitV1);
+
+            var ghMock = new Mock<IGitHubClient>();
+            ghMock.Setup(g => g.DownloadVerifiedWorkflowArtifactAsync(
+                    It.IsAny<string>(), "owner/provenance-app", "main", CommitV1, "serverforge-deploy.yml", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string _, string _, string _, string _, string _, string destPath, CancellationToken _) =>
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                    File.Copy(v1Zip, destPath, overwrite: true);
+                    return new GitHubArtifactDownloadResult(
+                        Found: true,
+                        LocalZipPath: destPath,
+                        ComputedSha256: v1Sha,
+                        TrustedApiDigestSha256: v1Sha,
+                        WorkflowRunId: 777001,
+                        ArtifactId: 888001,
+                        ArtifactName: "verified-gh-artifact",
+                        TrustSource: "GitHubActionsRun:777001/Artifact:888001",
+                        ErrorMessage: null);
+                });
+
+            await using var agent = await AgentHostFactory.CreateAndInitializeAsync(
+                args: [],
+                overrideOptions: new AgentOptions
+                {
+                    ServiceName = "ServerForgeProvenanceTest",
+                    BindAddress = "127.0.0.1",
+                    Port = 0,
+                    DataRoot = agentData,
+                    AppsRoot = agentApps
+                },
+                enableWindowsService: false,
+                enableAutoDeployWorker: false,
+                configureSerilog: false,
+                configureTestServices: services =>
+                {
+                    services.RemoveAll<IIisManager>();
+                    services.AddSingleton<IIisManager>(targetHost);
+                    services.RemoveAll<IGitHubClient>();
+                    services.AddSingleton<IGitHubClient>(ghMock.Object);
+                });
+
+            await agent.App.StartAsync();
+            var agentPort = agent.GetBoundPort();
+
+            var transport = new AgentTransportService(new DesktopIdentityService(desktopData));
+            var pair = await transport.PairWithAgentAsync(
+                "127.0.0.1", agentPort, agent.InitialPairingCode!, agent.ServerCertificate.Thumbprint, CancellationToken.None);
+            Assert.True(pair.Accepted);
+
+            var server = new ManagedServer
+            {
+                AgentId = pair.AgentId,
+                DisplayName = "Provenance Test Agent",
+                HostAddress = "127.0.0.1",
+                AgentPort = agentPort,
+                PinnedServerCertThumbprint = pair.AgentCertificateThumbprint,
+                ClientCertThumbprint = transport.GetCurrentClientThumbprint(),
+                Status = ServerConnectionStatus.Connected
+            };
+
+            await transport.SyncGitHubPatAsync(server, "github_pat_test_provenance_only", CancellationToken.None);
+            var project = new ProjectGroup { Name = "Provenance Suite", Slug = "provenance-suite" };
+            await transport.SyncProjectAsync(server, project, CancellationToken.None);
+
+            var ghApp = await transport.RegisterOrUpdateApplicationAsync(server, new UpsertApplicationRequest(
+                Id: null,
+                ProjectGroupId: project.Id,
+                Name: "Provenance GH App",
+                Slug: "provenance-app",
+                RuntimeType: ApplicationRuntimeType.AspNetCore,
+                RepositoryFullName: "owner/provenance-app",
+                Branch: "main",
+                WorkingDirectory: ".",
+                AutoDeployEnabled: true,
+                RepositoryExplicitlyAuthorized: true,
+                SourceMode: DeploymentSourceMode.GitHubActionsArtifact,
+                GitHubWorkflowFileName: "serverforge-deploy.yml",
+                BuildCommand: "",
+                StartCommand: "",
+                RuntimeVersion: "10.0",
+                InternalPort: targetHost.Port,
+                IisSiteName: "ServerForge_E2E_Prov",
+                IisAppPoolName: "ServerForge_E2E_Prov_Pool",
+                WindowsServiceName: "SF_prov",
+                PrimaryDomain: "localhost",
+                HealthCheckPath: "/health",
+                HealthCheckTimeoutSeconds: 5,
+                RetainHealthyReleasesCount: 5,
+                AutoRollbackOnFailure: true), CancellationToken.None);
+            Assert.NotNull(ghApp);
+
+            // 1. Caller attempts to pass a local file path to GitHubActionsArtifact app -> MUST be rejected HTTP 400
+            var localEx = await Assert.ThrowsAsync<HttpRequestException>(() =>
+                transport.TriggerDeploymentAsync(server, new TriggerDeploymentRequest(
+                    ghApp!.Id, CommitV1, "main", "spoof local path", "attacker", v1Zip, v1Sha, true, "api", 777001, 888001, "spoof", "GitHubActions"), CancellationToken.None));
+            Assert.Equal(HttpStatusCode.BadRequest, localEx.StatusCode);
+
+            // 2. Caller supplies forged workflow run ID (999999 != 777001) -> Agent server-side verifier MUST fail closed
+            var forgedRunRec = await transport.TriggerDeploymentAsync(server, new TriggerDeploymentRequest(
+                ghApp!.Id, CommitV1, "main", "forged run id", "attacker", null, v1Sha, true, "api", 999999, 888001, "spoof", "GitHubActions"), CancellationToken.None);
+            Assert.NotNull(forgedRunRec);
+            Assert.Equal(DeploymentState.Failed, forgedRunRec!.State);
+            Assert.False(forgedRunRec.TriggeredAutomatically); // API caller CANNOT spoof TriggeredAutomatically=true
+            Assert.Contains("mismatch", forgedRunRec.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 3. Caller supplies forged artifact ID (999888 != 888001) -> Agent server-side verifier MUST fail closed
+            var forgedArtRec = await transport.TriggerDeploymentAsync(server, new TriggerDeploymentRequest(
+                ghApp.Id, CommitV1, "main", "forged art id", "attacker", null, v1Sha, true, "api", 777001, 999888, "spoof", "GitHubActions"), CancellationToken.None);
+            Assert.NotNull(forgedArtRec);
+            Assert.Equal(DeploymentState.Failed, forgedArtRec!.State);
+            Assert.False(forgedArtRec.TriggeredAutomatically);
+
+            // 4. Legitimate manual trigger by commit SHA (no caller path) -> Agent verifies server-side via IGitHubClient and succeeds
+            var validRec = await transport.TriggerDeploymentAsync(server, new TriggerDeploymentRequest(
+                ghApp.Id, CommitV1, "main", "server-verified manual deploy", "operator", null, null, true, "operator"), CancellationToken.None);
+            Assert.NotNull(validRec);
+            Assert.Equal(DeploymentState.Successful, validRec!.State);
+            Assert.False(validRec.TriggeredAutomatically); // External HTTP API is ALWAYS TriggeredAutomatically=false
+
+            using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
+            var liveRoot = await probeHttp.GetFromJsonAsync<JsonElement>("/");
+            Assert.Equal("2.0.0-gh", liveRoot.GetProperty("version").GetString());
+
+            await agent.App.StopAsync();
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AgentGitHubProvenanceVerifier_RejectsUnauthorizedRepo_BranchMismatch_MissingPat_AndForgedRunOrArtifactIds()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"sf-verifier-unit-{Guid.NewGuid():N}");
+        var dataRoot = Path.Combine(root, "data");
+        Directory.CreateDirectory(dataRoot);
+        try
+        {
+            var agentOpts = new AgentOptions { DataRoot = dataRoot, AppsRoot = Path.Combine(root, "apps") };
+            var identityStore = new AgentIdentityStore(agentOpts);
+            var protector = new DpapiSecretProtector(DataProtectionScope.CurrentUser);
+            var ghMock = new Mock<IGitHubClient>();
+            var verifier = new AgentGitHubProvenanceVerifier(
+                ghMock.Object, protector, identityStore, new PathBoundaryGuard(), Options.Create(agentOpts), NullLogger<AgentGitHubProvenanceVerifier>.Instance);
+
+            var app = new ManagedApplication
+            {
+                ProjectGroupId = Guid.NewGuid(),
+                Name = "Verifier App",
+                Slug = "verifier-app",
+                RepositoryFullName = "owner/verifier-app",
+                Branch = "main",
+                RepositoryExplicitlyAuthorized = false
+            };
+
+            // 1. Unauthorized repository
+            var unauth = await verifier.ResolveAndVerifyArtifactAsync(app, "main", CommitV1);
+            Assert.False(unauth.Verified);
+            Assert.Contains("not explicitly authorized", unauth.FailureReason ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 2. Branch mismatch
+            app.RepositoryExplicitlyAuthorized = true;
+            var badBranch = await verifier.ResolveAndVerifyArtifactAsync(app, "evil-branch", CommitV1);
+            Assert.False(badBranch.Verified);
+            Assert.Contains("Branch mismatch", badBranch.FailureReason ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 3. Invalid commit SHA
+            var badSha = await verifier.ResolveAndVerifyArtifactAsync(app, "main", "not-a-sha");
+            Assert.False(badSha.Verified);
+
+            // 4. Missing Agent PAT
+            var noPat = await verifier.ResolveAndVerifyArtifactAsync(app, "main", CommitV1);
+            Assert.False(noPat.Verified);
+            Assert.Contains("Personal Access Token", noPat.FailureReason ?? "", StringComparison.OrdinalIgnoreCase);
+
+            ghMock.VerifyNoOtherCalls();
+        }
+        finally
+        {
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }

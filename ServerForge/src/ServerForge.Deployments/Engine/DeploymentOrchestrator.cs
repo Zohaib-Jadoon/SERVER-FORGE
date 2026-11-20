@@ -29,6 +29,7 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
     private readonly HttpClient _healthHttpClient;
     private readonly ILogger<DeploymentOrchestrator> _logger;
     private readonly IDeploymentStatePersistence? _persistence;
+    private readonly IGitHubArtifactProvenanceVerifier? _provenanceVerifier;
 
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _appLocks = new();
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeCancellations = new();
@@ -36,13 +37,17 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
     [GeneratedRegex(@"^[0-9a-fA-F]{40}$", RegexOptions.Compiled)]
     private static partial Regex FullGitShaRegex();
 
+    [GeneratedRegex(@"^[0-9a-fA-F]{64}$", RegexOptions.Compiled)]
+    private static partial Regex Sha256HexRegex();
+
     public DeploymentOrchestrator(
         IEnumerable<IAppDeploymentAdapter> adapters,
         IPathBoundaryGuard pathGuard,
         ISecretProtector secretProtector,
         HttpClient healthHttpClient,
         ILogger<DeploymentOrchestrator> logger,
-        IDeploymentStatePersistence? persistence = null)
+        IDeploymentStatePersistence? persistence = null,
+        IGitHubArtifactProvenanceVerifier? provenanceVerifier = null)
     {
         _adapters = adapters.ToDictionary(a => a.SupportedRuntime);
         _pathGuard = pathGuard;
@@ -50,14 +55,33 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
         _healthHttpClient = healthHttpClient;
         _logger = logger;
         _persistence = persistence;
+        _provenanceVerifier = provenanceVerifier;
     }
 
-    public async Task<DeploymentRecord> EnqueueAndExecuteAsync(
+    public Task<DeploymentRecord> EnqueueAndExecuteAsync(
         ManagedApplication application,
         TriggerDeploymentRequest request,
         IReadOnlyDictionary<string, string> resolvedEnvironmentVariables,
         IProgress<DeploymentStatusUpdate>? progress = null,
         CancellationToken cancellationToken = default)
+        => ExecuteInternalAsync(application, request, resolvedEnvironmentVariables, preVerifiedArtifact: null, progress, cancellationToken);
+
+    public Task<DeploymentRecord> EnqueueAndExecuteWithVerifiedArtifactAsync(
+        ManagedApplication application,
+        TriggerDeploymentRequest request,
+        IReadOnlyDictionary<string, string> resolvedEnvironmentVariables,
+        VerifiedGitHubArtifact verifiedArtifact,
+        IProgress<DeploymentStatusUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+        => ExecuteInternalAsync(application, request, resolvedEnvironmentVariables, preVerifiedArtifact: verifiedArtifact, progress, cancellationToken);
+
+    private async Task<DeploymentRecord> ExecuteInternalAsync(
+        ManagedApplication application,
+        TriggerDeploymentRequest request,
+        IReadOnlyDictionary<string, string> resolvedEnvironmentVariables,
+        VerifiedGitHubArtifact? preVerifiedArtifact,
+        IProgress<DeploymentStatusUpdate>? progress,
+        CancellationToken cancellationToken)
     {
         var validation = ApplicationConfigValidator.Validate(application);
         if (!validation.IsValid)
@@ -153,34 +177,119 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
             Directory.CreateDirectory(stagedDir);
             deployment.ReleaseDirectory = stagedDir;
 
-            // Step 1: Fetching & Strict Provenance Verification (Problem C)
+            // Step 1: Fetching & Strict Server-Side Provenance Verification (Phase 12.1)
             await EmitAsync(DeploymentState.Fetching, $"Verifying release source for {application.RepositoryFullName}@{shortSha}");
 
-            if (application.SourceMode is DeploymentSourceMode.GitHubActionsArtifact or DeploymentSourceMode.ManualSignedPackage)
+            if (application.SourceMode == DeploymentSourceMode.GitHubActionsArtifact)
             {
-                if (string.IsNullOrWhiteSpace(request.ArtifactDownloadUrl) || !File.Exists(request.ArtifactDownloadUrl))
+                // External API callers may NEVER bypass GitHub provenance by supplying local files or arbitrary URLs
+                if (preVerifiedArtifact is null && !string.IsNullOrWhiteSpace(request.ArtifactDownloadUrl))
+                {
+                    throw new UnauthorizedAccessException(
+                        "Deployment aborted: GitHubActionsArtifact mode rejects caller-supplied local file paths or arbitrary URLs. " +
+                        "Artifacts must be resolved independently through the Agent's authorized GitHub API client. " +
+                        "Use ManualSignedPackage mode for explicitly authorized local packages.");
+                }
+
+                VerifiedGitHubArtifact verified;
+                if (preVerifiedArtifact is not null)
+                {
+                    verified = preVerifiedArtifact;
+                }
+                else
+                {
+                    if (_provenanceVerifier is null)
+                    {
+                        throw new UnauthorizedAccessException(
+                            "Deployment aborted: GitHubActionsArtifact mode requires a server-side IGitHubArtifactProvenanceVerifier " +
+                            "to independently validate repository, branch, commit SHA, workflow run, artifact ID, and GitHub API digest.");
+                    }
+
+                    verified = await _provenanceVerifier.ResolveAndVerifyArtifactAsync(
+                        application,
+                        request.Branch,
+                        deployment.CommitSha,
+                        request.VerifiedWorkflowRunId,
+                        request.VerifiedArtifactId,
+                        linkedCts.Token).ConfigureAwait(false);
+                }
+
+                if (!verified.Verified ||
+                    string.IsNullOrWhiteSpace(verified.LocalZipPath) ||
+                    string.IsNullOrWhiteSpace(verified.TrustedSha256) ||
+                    !verified.WorkflowRunId.HasValue ||
+                    !verified.ArtifactId.HasValue)
+                {
+                    throw new UnauthorizedAccessException(
+                        $"Deployment aborted: server-side GitHub Actions artifact provenance verification failed: {verified.FailureReason ?? "Unverified artifact."}");
+                }
+
+                if (!File.Exists(verified.LocalZipPath))
                 {
                     throw new FileNotFoundException(
-                        "Deployment aborted: required release artifact archive is missing on disk. ServerForge never declares success without a verified artifact.");
+                        "Deployment aborted: verified GitHub Actions artifact archive is missing on disk.");
+                }
+
+                var zipInfo = new FileInfo(verified.LocalZipPath);
+                if (zipInfo.Length == 0)
+                    throw new InvalidDataException("Deployment aborted: verified GitHub Actions artifact archive is empty (0 bytes).");
+
+                if (!string.IsNullOrWhiteSpace(request.ExpectedArtifactSha256) &&
+                    !request.ExpectedArtifactSha256.Trim().Equals(verified.TrustedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new UnauthorizedAccessException(
+                        $"Deployment aborted: caller-supplied SHA-256 does not match independently verified GitHub API artifact digest.");
+                }
+
+                var actualHash = await SafeProcessRunner.ComputeFileSha256Async(verified.LocalZipPath, linkedCts.Token);
+                deployment.ArtifactSha256 = actualHash;
+
+                if (!actualHash.Equals(verified.TrustedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"Artifact SHA-256 integrity mismatch! Expected GitHub API digest {verified.TrustedSha256}, computed {actualHash}.");
+                }
+
+                var trustLabel = string.IsNullOrWhiteSpace(verified.TrustSource)
+                    ? $"GitHubActionsRun:{verified.WorkflowRunId.Value}/Artifact:{verified.ArtifactId.Value}"
+                    : verified.TrustSource;
+
+                await EmitAsync(DeploymentState.Staging,
+                    $"Extracting server-verified GitHub Actions artifact ({trustLabel}, SHA-256: {actualHash[..12]}...) to immutable release {releaseStamp}");
+
+                var extractedFileCount = ExtractZipSafely(verified.LocalZipPath, stagedDir);
+                if (extractedFileCount == 0)
+                    throw new InvalidDataException("Deployment aborted: artifact archive contained zero files.");
+            }
+            else if (application.SourceMode == DeploymentSourceMode.ManualSignedPackage)
+            {
+                if (string.IsNullOrWhiteSpace(request.ArtifactDownloadUrl))
+                {
+                    throw new FileNotFoundException(
+                        "Deployment aborted: ManualSignedPackage mode requires an explicit local artifact archive path.");
+                }
+
+                if (Uri.TryCreate(request.ArtifactDownloadUrl, UriKind.Absolute, out var candidateUri) &&
+                    !candidateUri.IsFile)
+                {
+                    throw new UnauthorizedAccessException(
+                        "Deployment aborted: ManualSignedPackage mode only permits verified local package files, not arbitrary remote URLs.");
+                }
+
+                if (!File.Exists(request.ArtifactDownloadUrl))
+                {
+                    throw new FileNotFoundException(
+                        "Deployment aborted: required local package archive is missing on disk. ServerForge never declares success without a verified artifact.");
                 }
 
                 var zipInfo = new FileInfo(request.ArtifactDownloadUrl);
                 if (zipInfo.Length == 0)
-                {
-                    throw new InvalidDataException("Deployment aborted: release artifact archive is empty (0 bytes).");
-                }
+                    throw new InvalidDataException("Deployment aborted: local package archive is empty (0 bytes).");
 
-                if (string.IsNullOrWhiteSpace(request.ExpectedArtifactSha256))
+                if (string.IsNullOrWhiteSpace(request.ExpectedArtifactSha256) || !Sha256HexRegex().IsMatch(request.ExpectedArtifactSha256.Trim()))
                 {
                     throw new UnauthorizedAccessException(
-                        "Deployment aborted: trusted expected SHA-256 provenance digest is required. Post-download self-hashing alone is never accepted as proof of trust.");
-                }
-
-                if (application.SourceMode == DeploymentSourceMode.GitHubActionsArtifact &&
-                    (!request.VerifiedWorkflowRunId.HasValue || !request.VerifiedArtifactId.HasValue))
-                {
-                    throw new UnauthorizedAccessException(
-                        "Deployment aborted: GitHub Actions workflow run ID and artifact identity must be verified prior to deployment.");
+                        "Deployment aborted: ManualSignedPackage mode requires a valid 64-character SHA-256 digest.");
                 }
 
                 var actualHash = await SafeProcessRunner.ComputeFileSha256Async(request.ArtifactDownloadUrl, linkedCts.Token);
@@ -189,18 +298,21 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
                 if (!actualHash.Equals(request.ExpectedArtifactSha256.Trim(), StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException(
-                        $"Artifact SHA-256 integrity mismatch! Expected trusted digest {request.ExpectedArtifactSha256}, computed {actualHash}.");
+                        $"Artifact SHA-256 integrity mismatch! Expected digest {request.ExpectedArtifactSha256}, computed {actualHash}.");
                 }
 
-                // Step 2: Safe Zip-Slip extraction into immutable directory
+                // Never allow a ManualSignedPackage to masquerade as verified GitHub Actions provenance
+                var manualTrustLabel = !string.IsNullOrWhiteSpace(request.ArtifactTrustSource) &&
+                                       request.ArtifactTrustSource.Contains("LOCAL TEST ARTIFACT", StringComparison.OrdinalIgnoreCase)
+                    ? "LOCAL TEST ARTIFACT (ManualSignedPackage - NOT GitHub Provenance)"
+                    : "ManualSignedPackage (VerifiedLocalSha256 - NOT GitHub Provenance)";
+
                 await EmitAsync(DeploymentState.Staging,
-                    $"Extracting verified artifact ({request.ArtifactTrustSource ?? "TrustedDigest"}, SHA-256: {actualHash[..12]}...) to immutable release {releaseStamp}");
+                    $"Extracting authorized manual package ({manualTrustLabel}, SHA-256: {actualHash[..12]}...) to immutable release {releaseStamp}");
 
                 var extractedFileCount = ExtractZipSafely(request.ArtifactDownloadUrl, stagedDir);
                 if (extractedFileCount == 0)
-                {
                     throw new InvalidDataException("Deployment aborted: artifact archive contained zero files.");
-                }
             }
             else if (application.SourceMode == DeploymentSourceMode.ServerLocalBuildExplicitOptIn)
             {

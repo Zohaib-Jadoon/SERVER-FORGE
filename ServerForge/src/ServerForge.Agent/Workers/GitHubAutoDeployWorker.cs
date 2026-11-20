@@ -112,13 +112,7 @@ public sealed class GitHubAutoDeployWorker : BackgroundService
                 _logger.LogInformation("Detected new commit {Sha} on {Repo}:{Branch} for {App}. Verifying workflow artifact.",
                     head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], app.RepositoryFullName, app.Branch, app.Name);
 
-                string? localArtifactZip = null;
-                string? trustedDigest = null;
-                long? workflowRunId = null;
-                long? artifactId = null;
-                string? artifactName = null;
-                string? trustSource = null;
-
+                VerifiedGitHubArtifact? verifiedArtifact = null;
                 if (app.SourceMode == DeploymentSourceMode.GitHubActionsArtifact)
                 {
                     var artifactPath = Path.Combine(_options.DataRoot, "artifacts", app.Slug, $"{head.LatestCommitSha}.zip");
@@ -131,19 +125,26 @@ public sealed class GitHubAutoDeployWorker : BackgroundService
                         artifactPath,
                         ct);
 
-                    if (!dl.Found || string.IsNullOrWhiteSpace(dl.TrustedApiDigestSha256))
+                    if (!dl.Found ||
+                        string.IsNullOrWhiteSpace(dl.LocalZipPath) ||
+                        string.IsNullOrWhiteSpace(dl.TrustedApiDigestSha256) ||
+                        !dl.WorkflowRunId.HasValue ||
+                        !dl.ArtifactId.HasValue)
                     {
                         _logger.LogInformation("Waiting for verified GitHub Actions artifact for {App}@{Sha}: {Reason}",
                             app.Slug, head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], dl.ErrorMessage);
                         continue;
                     }
 
-                    localArtifactZip = dl.LocalZipPath;
-                    trustedDigest = dl.TrustedApiDigestSha256;
-                    workflowRunId = dl.WorkflowRunId;
-                    artifactId = dl.ArtifactId;
-                    artifactName = dl.ArtifactName;
-                    trustSource = dl.TrustSource;
+                    verifiedArtifact = new VerifiedGitHubArtifact(
+                        Verified: true,
+                        LocalZipPath: dl.LocalZipPath,
+                        TrustedSha256: dl.TrustedApiDigestSha256,
+                        WorkflowRunId: dl.WorkflowRunId,
+                        ArtifactId: dl.ArtifactId,
+                        ArtifactName: dl.ArtifactName,
+                        TrustSource: dl.TrustSource ?? $"GitHubActionsRun:{dl.WorkflowRunId}/Artifact:{dl.ArtifactId}",
+                        FailureReason: null);
                 }
 
                 var envVars = await _store.ResolveDecryptedEnvVarsAsync(app.Id, EnvironmentTier.Production, ct);
@@ -153,16 +154,18 @@ public sealed class GitHubAutoDeployWorker : BackgroundService
                     Branch: app.Branch,
                     CommitMessage: head.CommitMessage,
                     CommitAuthor: head.CommitAuthor,
-                    ArtifactDownloadUrl: localArtifactZip,
-                    ExpectedArtifactSha256: trustedDigest,
+                    ArtifactDownloadUrl: null,
+                    ExpectedArtifactSha256: verifiedArtifact?.TrustedSha256,
                     TriggeredAutomatically: true,
                     RequestedBy: "ServerForge.Agent.AutoDeploy",
-                    VerifiedWorkflowRunId: workflowRunId,
-                    VerifiedArtifactId: artifactId,
-                    VerifiedArtifactName: artifactName,
-                    ArtifactTrustSource: trustSource);
+                    VerifiedWorkflowRunId: verifiedArtifact?.WorkflowRunId,
+                    VerifiedArtifactId: verifiedArtifact?.ArtifactId,
+                    VerifiedArtifactName: verifiedArtifact?.ArtifactName,
+                    ArtifactTrustSource: verifiedArtifact?.TrustSource);
 
-                var record = await _deploymentEngine.EnqueueAndExecuteAsync(app, trigger, envVars, cancellationToken: ct);
+                var record = verifiedArtifact is not null
+                    ? await _deploymentEngine.EnqueueAndExecuteWithVerifiedArtifactAsync(app, trigger, envVars, verifiedArtifact, cancellationToken: ct)
+                    : await _deploymentEngine.EnqueueAndExecuteAsync(app, trigger, envVars, cancellationToken: ct);
                 await _store.RecordDeploymentAsync(record, ct);
                 await _store.UpsertApplicationAsync(app, "ServerForge.Agent.AutoDeploy", ct);
             }

@@ -1,57 +1,199 @@
 name: Optional Disposable Windows IIS E2E Acceptance (Manual Only)
 
-# PHASE 12J SAFETY NOTICE:
+# PHASE 12.1 HARDENED SAFETY NOTICE:
 # - Strictly separated from /.github/workflows/build-windows-installers.yml.
-# - NEVER triggered on push/PR and NEVER deploys to production servers.
-# - Requires explicit operator confirmation (`confirm_disposable_environment=true`)
-#   and a Windows host/runner with Microsoft IIS + .NET 10 Hosting Bundle pre-installed.
-# - Preflight aborts immediately if IIS/AspNetCoreModuleV2 are absent or if production
-#   ServerForgeAgent services exist.
+# - Triggered ONLY by manual `workflow_dispatch` (NEVER on push or pull_request).
+# - Requires GitHub Environment approval (`disposable-windows-iis-e2e`).
+# - NEVER uses `windows-latest` as a misleading default; targets an explicitly approved,
+#   self-hosted disposable Windows IIS VM label (`disposable-windows-iis-e2e`).
+# - NEVER interpolates `${{ inputs.* }}` inside PowerShell script source; all inputs are
+#   passed via environment variables and strictly validated before execution.
+# - Requires a positive disposable host identity marker on the runner machine AND rejects
+#   any host with a production `ServerForgeAgent` service or production identity file.
 
 on:
   workflow_dispatch:
     inputs:
       confirm_disposable_environment:
-        description: 'Confirm target runner is a DISPOSABLE Windows IIS test environment (never production)'
+        description: 'Confirm target runner is a DISPOSABLE Windows IIS test VM (never production)'
         required: true
         type: boolean
         default: false
       runner_label:
-        description: 'Target runner label (use a self-hosted disposable Windows IIS VM label, e.g., windows-iis-e2e)'
+        description: 'Approved self-hosted disposable Windows IIS runner label (must include disposable/e2e; never windows-latest or prod)'
         required: true
         type: string
-        default: 'windows-latest'
+        default: 'disposable-windows-iis-e2e'
+      test_mode:
+        description: 'Select TEST A (local IIS artifact only) or TEST A + TEST B (genuine autonomous GitHub Actions polling)'
+        required: true
+        type: choice
+        default: 'test-a-local-iis-only'
+        options:
+          - 'test-a-local-iis-only'
+          - 'test-a-and-test-b-github-autonomous'
       disposable_github_repo:
-        description: 'Optional disposable sample repo (owner/repo) for live GitHub metadata association'
+        description: 'Disposable sample GitHub repo (owner/repo) required ONLY for TEST B autonomous GitHub polling'
         required: false
         type: string
         default: ''
+      disposable_github_branch:
+        description: 'Disposable sample GitHub branch (TEST B only)'
+        required: false
+        type: string
+        default: 'main'
       agent_port:
-        description: 'Isolated loopback Agent port (127.0.0.1)'
+        description: 'Isolated loopback Agent port on 127.0.0.1 (1024-65535, not 9443)'
         required: false
         type: string
         default: '19443'
       app_port:
-        description: 'Isolated loopback IIS app port (127.0.0.1)'
+        description: 'Isolated loopback IIS app port for TEST A on 127.0.0.1 (1024-65535)'
         required: false
         type: string
         default: '15199'
+      github_app_port:
+        description: 'Isolated loopback IIS app port for TEST B on 127.0.0.1 (1024-65535, must differ from app_port)'
+        required: false
+        type: string
+        default: '15200'
+
+permissions:
+  contents: read
 
 jobs:
+  validate-inputs-and-runner:
+    name: Validate E2E Safety Inputs (Before Runner Dispatch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      approved_runner_label: ${{ steps.validate.outputs.approved_runner_label }}
+      validated_agent_port: ${{ steps.validate.outputs.validated_agent_port }}
+      validated_app_port: ${{ steps.validate.outputs.validated_app_port }}
+      validated_gh_app_port: ${{ steps.validate.outputs.validated_gh_app_port }}
+      validated_repo: ${{ steps.validate.outputs.validated_repo }}
+      validated_branch: ${{ steps.validate.outputs.validated_branch }}
+      validated_test_mode: ${{ steps.validate.outputs.validated_test_mode }}
+    steps:
+      - name: Strict Input & Runner Label Allowlist Validation
+        id: validate
+        shell: bash
+        env:
+          INPUT_CONFIRM: ${{ inputs.confirm_disposable_environment }}
+          INPUT_RUNNER_LABEL: ${{ inputs.runner_label }}
+          INPUT_TEST_MODE: ${{ inputs.test_mode }}
+          INPUT_REPO: ${{ inputs.disposable_github_repo }}
+          INPUT_BRANCH: ${{ inputs.disposable_github_branch }}
+          INPUT_AGENT_PORT: ${{ inputs.agent_port }}
+          INPUT_APP_PORT: ${{ inputs.app_port }}
+          INPUT_GH_APP_PORT: ${{ inputs.github_app_port }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$INPUT_CONFIRM" != "true" ]]; then
+            echo "::error::Refusing to run: confirm_disposable_environment must be explicitly set to true."
+            exit 1
+          fi
+
+          if [[ ! "$INPUT_RUNNER_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$ ]]; then
+            echo "::error::Invalid runner_label format."
+            exit 1
+          fi
+
+          LOWER_LABEL="$(echo "$INPUT_RUNNER_LABEL" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$LOWER_LABEL" == "windows-latest" || "$LOWER_LABEL" == "windows-2022" || "$LOWER_LABEL" == "windows-2025" || "$LOWER_LABEL" == "ubuntu-latest" ]]; then
+            echo "::error::GitHub-hosted default runner '$INPUT_RUNNER_LABEL' lacks pre-provisioned Windows IIS + .NET 10 Hosting Bundle. Use a dedicated self-hosted disposable Windows IIS VM runner label."
+            exit 1
+          fi
+          if [[ "$LOWER_LABEL" =~ (prod|production|live|primary) ]]; then
+            echo "::error::Refusing runner label '$INPUT_RUNNER_LABEL': production-like runner names are strictly blocked."
+            exit 1
+          fi
+          if [[ ! "$LOWER_LABEL" =~ (disposable|e2e) ]]; then
+            echo "::error::Runner label '$INPUT_RUNNER_LABEL' must explicitly contain 'disposable' or 'e2e' to prevent targeting non-disposable hosts."
+            exit 1
+          fi
+
+          validate_port() {
+            local name="$1"
+            local val="$2"
+            if [[ ! "$val" =~ ^[0-9]{1,5}$ ]]; then
+              echo "::error::Port '$name' must be a numeric integer between 1024 and 65535."
+              exit 1
+            fi
+            if (( val < 1024 || val > 65535 )); then
+              echo "::error::Port '$name' ($val) must be in the unprivileged range 1024-65535 (never port 80/443)."
+              exit 1
+            fi
+            if (( val == 9443 )); then
+              echo "::error::Port '$name' cannot be 9443 (reserved for production ServerForge Agent)."
+              exit 1
+            fi
+          }
+
+          validate_port "agent_port" "$INPUT_AGENT_PORT"
+          validate_port "app_port" "$INPUT_APP_PORT"
+          validate_port "github_app_port" "$INPUT_GH_APP_PORT"
+
+          if [[ "$INPUT_AGENT_PORT" == "$INPUT_APP_PORT" || "$INPUT_AGENT_PORT" == "$INPUT_GH_APP_PORT" || "$INPUT_APP_PORT" == "$INPUT_GH_APP_PORT" ]]; then
+            echo "::error::Conflicting ports: agent_port, app_port, and github_app_port must all be distinct."
+            exit 1
+          fi
+
+          if [[ -n "$INPUT_REPO" ]]; then
+            if [[ ! "$INPUT_REPO" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]] || [[ "$INPUT_REPO" == *".."* ]]; then
+              echo "::error::Invalid disposable_github_repo format. Expected strict 'owner/repository'."
+              exit 1
+            fi
+          fi
+
+          if [[ "$INPUT_TEST_MODE" == "test-a-and-test-b-github-autonomous" && -z "$INPUT_REPO" ]]; then
+            echo "::error::disposable_github_repo is required when test_mode is 'test-a-and-test-b-github-autonomous'."
+            exit 1
+          fi
+
+          if [[ ! "$INPUT_BRANCH" =~ ^[A-Za-z0-9._/-]{1,80}$ ]] || [[ "$INPUT_BRANCH" == *".."* ]]; then
+            echo "::error::Invalid disposable_github_branch format."
+            exit 1
+          fi
+
+          {
+            echo "approved_runner_label=$INPUT_RUNNER_LABEL"
+            echo "validated_agent_port=$INPUT_AGENT_PORT"
+            echo "validated_app_port=$INPUT_APP_PORT"
+            echo "validated_gh_app_port=$INPUT_GH_APP_PORT"
+            echo "validated_repo=$INPUT_REPO"
+            echo "validated_branch=$INPUT_BRANCH"
+            echo "validated_test_mode=$INPUT_TEST_MODE"
+          } >> "$GITHUB_OUTPUT"
+
   disposable-iis-e2e:
     name: Disposable Windows IIS End-to-End Acceptance
-    runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 30
+    needs: validate-inputs-and-runner
+    environment: disposable-windows-iis-e2e
+    runs-on: [ self-hosted, windows, "${{ needs.validate-inputs-and-runner.outputs.approved_runner_label }}" ]
+    timeout-minutes: 35
 
     steps:
-      - name: Enforce Explicit Disposable Environment Confirmation
+      - name: Positive Disposable Test-Environment Host Identity Verification
         shell: pwsh
         run: |
-          if ('${{ inputs.confirm_disposable_environment }}' -ne 'true') {
-            Write-Error 'Refusing to run: confirm_disposable_environment must be explicitly set to true.'
-            exit 1
+          $ErrorActionPreference = 'Stop'
+          $markerPath = 'C:\ProgramData\ServerForgeE2E\DISPOSABLE_IIS_E2E_HOST.marker'
+          $hasMarkerFile = (Test-Path $markerPath) -and ((Get-Content $markerPath -Raw) -match 'SERVERFORGE_DISPOSABLE_E2E_HOST=true')
+          $hasEnvMarker = [string]::Equals($env:SERVERFORGE_DISPOSABLE_E2E_HOST, 'true', [StringComparison]::OrdinalIgnoreCase)
+
+          if (-not ($hasMarkerFile -or $hasEnvMarker)) {
+            throw "SAFETY ABORT: Target Windows host is NOT positively marked as a disposable ServerForge E2E VM. Create '$markerPath' containing 'SERVERFORGE_DISPOSABLE_E2E_HOST=true' on a dedicated non-production IIS test VM before dispatching."
           }
-          Write-Host "Confirmed disposable E2E execution on runner label: ${{ inputs.runner_label }}"
+
+          if ($null -ne (Get-Service -Name 'ServerForgeAgent' -ErrorAction SilentlyContinue)) {
+            throw "SAFETY ABORT: Production Windows Service 'ServerForgeAgent' detected on runner host. Aborting immediately."
+          }
+          if (Test-Path 'C:\ProgramData\ServerForge\Agent\agent-identity.json') {
+            throw 'SAFETY ABORT: Existing production ServerForge Agent identity detected on runner host. Aborting immediately.'
+          }
+          Write-Host "Positive disposable IIS E2E host identity verified on $env:COMPUTERNAME."
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -69,14 +211,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue) -and
               -not (Test-Path 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe')) {
-            choco install innosetup --no-progress -y
+            throw 'Inno Setup 6 (ISCC.exe) is required on the disposable Windows IIS runner.'
           }
           & ./ServerForge/scripts/build-installers.ps1 -SkipBuild
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Run Phase 12 Preflight, Disposable IIS Setup, Deploy, Update & Rollback
-        id: e2e
+      - name: Setup Disposable IIS + Agent & Run TEST A (Local Verified Artifact on Real IIS)
         shell: pwsh
+        env:
+          E2E_AGENT_PORT: ${{ needs.validate-inputs-and-runner.outputs.validated_agent_port }}
+          E2E_APP_PORT: ${{ needs.validate-inputs-and-runner.outputs.validated_app_port }}
+          E2E_GH_APP_PORT: ${{ needs.validate-inputs-and-runner.outputs.validated_gh_app_port }}
+          E2E_TEST_MODE: ${{ needs.validate-inputs-and-runner.outputs.validated_test_mode }}
         run: |
           $ErrorActionPreference = 'Stop'
           $runId = "gh$env:GITHUB_RUN_ID"
@@ -89,22 +235,43 @@ jobs:
           "E2E_WORKSPACE=$workspaceRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding UTF8
           "E2E_EVIDENCE=$evidenceOut" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding UTF8
 
+          $agentPort = [int]$env:E2E_AGENT_PORT
+          $appPort = [int]$env:E2E_APP_PORT
+          $ghAppPort = [int]$env:E2E_GH_APP_PORT
+
           & ./ServerForge/scripts/e2e/setup-disposable-iis.ps1 `
             -RunId $runId `
             -AgentInstallerPath $agentInstaller `
             -WorkspaceRoot $workspaceRoot `
-            -AgentPort ([int]'${{ inputs.agent_port }}') `
-            -AppPort ([int]'${{ inputs.app_port }}')
+            -AgentPort $agentPort `
+            -AppPort $appPort `
+            -GitHubAppPort $ghAppPort
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $manifestPath = Join-Path $workspaceRoot 'e2e-manifest.json'
-          & ./ServerForge/scripts/e2e/run-deployment-tests.ps1 `
-            -ManifestPath $manifestPath `
-            -GitHubRepo '${{ inputs.disposable_github_repo }}'
+          & ./ServerForge/scripts/e2e/run-deployment-tests.ps1 -ManifestPath $manifestPath
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          & ./ServerForge/scripts/e2e/verify-rollback.ps1 `
-            -ManifestPath $manifestPath
+          & ./ServerForge/scripts/e2e/verify-rollback.ps1 -ManifestPath $manifestPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run TEST B (Genuine Autonomous GitHub Actions Deployment & Rollback)
+        if: ${{ needs.validate-inputs-and-runner.outputs.validated_test_mode == 'test-a-and-test-b-github-autonomous' }}
+        shell: pwsh
+        env:
+          E2E_DISPOSABLE_GITHUB_REPO: ${{ needs.validate-inputs-and-runner.outputs.validated_repo }}
+          E2E_DISPOSABLE_GITHUB_BRANCH: ${{ needs.validate-inputs-and-runner.outputs.validated_branch }}
+          E2E_DISPOSABLE_GITHUB_PAT: ${{ secrets.E2E_DISPOSABLE_GITHUB_PAT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:E2E_DISPOSABLE_GITHUB_PAT)) {
+            throw 'Missing test-only secret E2E_DISPOSABLE_GITHUB_PAT in GitHub Environment disposable-windows-iis-e2e.'
+          }
+          $manifestPath = Join-Path $env:E2E_WORKSPACE 'e2e-manifest.json'
+          & ./ServerForge/scripts/e2e/run-github-autonomous-test.ps1 `
+            -ManifestPath $manifestPath `
+            -GitHubRepo $env:E2E_DISPOSABLE_GITHUB_REPO `
+            -GitHubBranch $env:E2E_DISPOSABLE_GITHUB_BRANCH
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Collect Sanitized Diagnostics & Clean Up Owned Disposable Resources

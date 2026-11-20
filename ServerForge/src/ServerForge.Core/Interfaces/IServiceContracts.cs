@@ -26,6 +26,27 @@ public interface IDeploymentStatePersistence
     Task<int> RecoverInterruptedDeploymentsAsync(CancellationToken ct = default);
 }
 
+public sealed record VerifiedGitHubArtifact(
+    bool Verified,
+    string? LocalZipPath,
+    string? TrustedSha256,
+    long? WorkflowRunId,
+    long? ArtifactId,
+    string? ArtifactName,
+    string? TrustSource,
+    string? FailureReason);
+
+public interface IGitHubArtifactProvenanceVerifier
+{
+    Task<VerifiedGitHubArtifact> ResolveAndVerifyArtifactAsync(
+        ManagedApplication application,
+        string branch,
+        string commitSha,
+        long? requestedWorkflowRunId = null,
+        long? requestedArtifactId = null,
+        CancellationToken ct = default);
+}
+
 public interface IDeploymentEngine
 {
     Task<DeploymentRecord> EnqueueAndExecuteAsync(
@@ -34,6 +55,15 @@ public interface IDeploymentEngine
         IReadOnlyDictionary<string, string> resolvedEnvironmentVariables,
         IProgress<DeploymentStatusUpdate>? progress = null,
         CancellationToken cancellationToken = default);
+
+    Task<DeploymentRecord> EnqueueAndExecuteWithVerifiedArtifactAsync(
+        ManagedApplication application,
+        TriggerDeploymentRequest request,
+        IReadOnlyDictionary<string, string> resolvedEnvironmentVariables,
+        VerifiedGitHubArtifact verifiedArtifact,
+        IProgress<DeploymentStatusUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+        => EnqueueAndExecuteAsync(application, request, resolvedEnvironmentVariables, progress, cancellationToken);
 
     Task<DeploymentRecord> RollbackToLastHealthyReleaseAsync(
         ManagedApplication application,

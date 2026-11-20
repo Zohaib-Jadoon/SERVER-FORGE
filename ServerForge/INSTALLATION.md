@@ -106,9 +106,9 @@ Unattended GitHub Actions `windows-latest` runners verify installer execution, s
 - [ ] **NOT VERIFIED** — Navigate all 13 screens (`Ctrl+1`..`Ctrl+9`, `Ctrl+M`, `Ctrl+L`, `Ctrl+B`, `Ctrl+,`) and verify zero unhandled exceptions or clipped controls.
 - [ ] **NOT VERIFIED** — Click window Close (`X`) -> verify app minimizes to system tray -> double-click tray icon to reopen -> right-click tray icon -> Exit cleanly.
 - [ ] **NOT VERIFIED** — Pair a live disposable Windows Server Agent over private VPN -> restart Desktop -> confirm automatic mTLS reconnection without re-pairing.
-- [ ] **NOT VERIFIED** — Complete the 20-step disposable E2E deployment & rollback runbook in `/ServerForge/samples/disposable-test-app/README.md`.
+- [ ] **NOT VERIFIED** — Execute **TEST A** (local sample artifact on real IIS via `run-deployment-tests.ps1` + `verify-rollback.ps1`) and **TEST B** (real GitHub Actions autonomous push-to-IIS deploy & rollback via `run-github-autonomous-test.ps1` with Desktop closed) on a disposable Windows Server IIS VM per `/ServerForge/DISPOSABLE_IIS_TEST_GUIDE.md`.
 
-### Phase 12 Acceptance Guides & Evidence Templates
+### Phase 12.1 Acceptance Guides & Evidence Templates
 - **Full 13-Screen Interactive Windows 11 WPF Runbook**: `/ServerForge/WINDOWS_DESKTOP_ACCEPTANCE.md`
-- **Reproducible Disposable Windows IIS E2E Harness Guide**: `/ServerForge/DISPOSABLE_IIS_TEST_GUIDE.md`
-- **Current Acceptance Evidence Matrix**: `/ServerForge/E2E_ACCEPTANCE_REPORT.md`
+- **Reproducible Disposable Windows IIS E2E Guide (TEST A & TEST B)**: `/ServerForge/DISPOSABLE_IIS_TEST_GUIDE.md`
+- **Current 4-Status Acceptance Evidence Matrix**: `/ServerForge/E2E_ACCEPTANCE_REPORT.md`

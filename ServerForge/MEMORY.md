@@ -1,33 +1,35 @@
-# ServerForge Engineering Memory
+# ServerForge — Engineering Memory & Verified Baseline
 
-- **Canonical Repository**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE.git`
-- **Target Product**: Genuine native Windows x64 `.NET 10 LTS` WPF Desktop (`ServerForge-Desktop-Setup.exe`) + `.NET 10` Windows Service Agent (`ServerForge-Agent-Setup.exe`). React/Vite root app is strictly a read-only source browser.
-- **Root Workflow Rule**: GitHub Actions CI MUST live at repository root `/.github/workflows/build-windows-installers.yml`, not inside `ServerForge/.github/workflows/`.
-- **Verified CI Milestones**:
-  - Run `44684923525` (`main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`): First full green Windows CI run — `.NET 10` build PASSED, `24/24` xUnit tests PASSED, self-contained `win-x64` Desktop (`~62.92 MB`) & Agent (`~46.64 MB`) Inno Setup 6 installers + `SHA256SUMS.txt` GENERATED and uploaded.
-  - Run `44690875542` (`main` @ `0aef82a8ed92c47a2b03663912026e66b8545a92`): First CI job (`build-test-package-windows`) 100% GREEN (`32/32` tests + installers); second job failed at Desktop uninstall relative `/LOG=`.
-  - Run `44699230392` (`main` @ `2207141082e1e8024c0ff2036995d81a63ec1caa`): **BOTH WINDOWS CI JOBS 100% GREEN** — `.NET 10` compilation PASS, `32/32` xUnit tests PASS, Desktop & Agent installers built + `SHA256SUMS.txt` verified, and `smoke-test-windows-installers` achieved **50 PASSED, 0 FAILED** (Desktop install/upgrade/uninstall, Agent Windows Service install/restart/upgrade/uninstall, identity/cert persistence, loopback-only `127.0.0.1:9443`, hosted-file preservation).
-- **Security & Production Protection Invariants**:
-  1. Never mutate pre-existing unmanaged IIS sites, AppPools, Classic ASP directories, or production databases without explicit adoption and dry-run review.
-  2. Never accept a deployment without a verified, non-empty, provenance-checked artifact (exact 40-char SHA, authorized repo/branch, trusted SHA-256 digest from GitHub Actions API).
-  3. Persist paired servers and pinned cert thumbprints in SQLite immediately so Desktop restarts reconnect seamlessly without re-pairing.
-  4. Never store secrets in plaintext SQLite, logs, docs, or GitHub repositories; enforce DPAPI + redaction (`ISecretProtector.RedactSecrets`).
-  5. Removing an application from ServerForge management MUST NEVER delete hosted files, IIS sites, or databases.
-  6. Never auto-revert destructive database schema migrations during application rollback.
-  7. Never fabricate build, test, or installer results when running on a Linux host without `.NET 10` Windows SDK or `ISCC.exe`, never claim CI tests interactive WPF GUI rendering, and never claim unsigned installers are signed.
-  8. Preserve SQLite foreign-key enforcement (`ProjectGroup -> ManagedApplication`). Use explicit idempotent `ServerForgeStore.EnsureDefaultProjectAsync` (slug `"default"`) when no explicit project group exists.
-  9. Inno Setup 6 Pascal Script does NOT support `out` parameters — declare output parameters with `var`, use `AnsiString` for `LoadStringFromFile`, guard `WizardSilent()` in Setup only, and use `SuppressibleMsgBox` so `/VERYSILENT` installs never hang when IIS is absent.
-  10. Never rely on EF Core's default SQLite `DateTimeOffset` mapping in `ORDER BY` or range queries; always persist `DateTimeOffset` / `DateTimeOffset?` via `UtcIso8601DateTimeOffsetConverter` (`yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'`) with deterministic primary-key tie-breakers.
-  11. Never drop or recreate existing ServerForge SQLite metadata databases during upgrades; evolve schema exclusively via `SqliteSchemaMigrator` (`__ServerForgeSchemaVersions`) with a pre-upgrade `SqliteConnection.BackupDatabase` `.bak` copy (`Pooling=False`) and atomic transactional rollback on failure.
-  12. WPF `App.xaml` MUST use `ShutdownMode="OnExplicitShutdown"` (never `OnMainWindowClose`) because closing `SetupWizardWindow` before `MainWindow` is created otherwise terminates the application on first launch.
-  13. Windows Schannel (`Kestrel` + `HttpClientHandler` mTLS) requires persisted CNG private keys (`X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.Exportable`) reloaded from PFX rather than ephemeral in-memory keys returned directly from `CertificateRequest.CreateSelfSigned(...)`.
-  14. Always call `SqliteConnection.ClearAllPools()` in test `finally` blocks on Windows before deleting temp SQLite directories.
-  15. Setting `<UseWPF>true</UseWPF>` in any `.csproj` suppresses implicit `System.IO` (and `System.Net.Http`) global usings to avoid `System.Windows.Shapes.Path` collisions; always add explicit `using System.IO;` in test/desktop files using `Path`, `Directory`, or `File` rather than mutating global implicit usings.
-  16. `IDbContextFactory<T>.CreateDbContextAsync` is a default interface method (DIM) and cannot be invoked on a concrete class reference unless explicitly implemented or called through an `IDbContextFactory<T>` interface variable.
-  17. When running an ASP.NET Core host as a Windows Service (`WindowsServiceHelpers.IsWindowsService()`), pass `ContentRootPath = AppContext.BaseDirectory` to `WebApplication.CreateBuilder(new WebApplicationOptions { ... })` so `appsettings.json` is loaded from the install directory instead of `C:\Windows\System32`.
-  18. SQLite (`Microsoft.Data.Sqlite`) does not auto-create missing parent directories and throws `SQLite Error 14: unable to open database file`; every production and test helper initializing a file-backed SQLite DB must call `Directory.CreateDirectory(parentDir)` first.
-  19. Inno Setup 6 `unins000.exe` delegates file deletion and `CurUninstallStepChanged` (`sc.exe delete`) to a temporary child process (`_iu*.tmp`) and may return before cleanup finishes; automated smoke tests must poll for binary, registry, and service removal rather than asserting immediately upon parent exit.
-  20. Inno Setup 6 `unins*.exe` copies itself into `%TEMP%\_iu*.tmp` and re-launches with `CWD = %TEMP%` so `{app}` can be deleted; any `/LOG=` parameter passed to an Inno Setup uninstaller MUST be a fully qualified absolute path (never relative), and smoke tests should resolve the authoritative post-upgrade uninstaller path from Windows Uninstall registry (`UninstallString` / `QuietUninstallString`) with `-WorkingDirectory $env:TEMP`.
-  21. `AspNetCoreDeploymentAdapter` MUST inject resolved environment variables into each immutable staged release's `web.config` (`<aspNetCore><environmentVariables>`) and trigger a graceful AppPool recycle on cutover/rollback so IIS `AspNetCoreModuleV2` loads the exact release configuration and restores the previous release's healthy `web.config` automatically upon rollback.
-  22. `GitHubAutoDeployWorker` and `DeploymentOrchestrator` MUST check `HasAttemptedAutonomousDeploymentForCommitAsync` (covering active, succeeded, and previously failed/rolled-back autonomous deployments) so a broken commit never triggers an endless retry loop even across Agent restarts, while still allowing manual operator retries or new recovery commit SHAs.
-  23. All disposable IIS E2E resources MUST use the strict ownership prefix `ServerForge_E2E_<RunId>`, loopback-only bindings (`127.0.0.1:<port>`), and preflight guards refusing execution on production hosts or auto-installing Windows roles.
+## Verified Native Platform Baseline (DO NOT REGRESS)
+- **Repository:** `https://github.com/Zohaib-Jadoon/SERVER-FORGE`
+- **Architecture:** Native `.NET 10 LTS` Windows WPF Desktop (`ServerForge.Desktop`, 13 native WPF screens + WinForms `NotifyIcon`) + Windows Service Agent (`ServerForge.Agent`, loopback/VPN mTLS) + SQLite EF Core + Inno Setup 6 installers.
+- **Latest Verified Windows CI Run #9 (`44715138404` @ commit `b97cdfd56c5605a598620fee9683ac5ea56ea6f2`):**
+  - Native `.NET 10` solution build + sample app build: **PASS**
+  - Automated xUnit tests: **38 / 38 PASS** (`0` skipped)
+  - Desktop & Agent self-contained publishing + Inno Setup 6 installers + SHA-256 verification: **PASS**
+  - `smoke-test-windows-installers`: **50 / 50 PASS**
+  - Both Windows CI jobs: **GREEN**
+
+## Phase 12.1 Security & Acceptance Hardening (Pending CI Run #10)
+1. **Server-Side GitHub Artifact Provenance (Critical Review Finding 2):**
+   - Added `IGitHubArtifactProvenanceVerifier` (`AgentGitHubProvenanceVerifier`) and wired it into `DeploymentOrchestrator` and `AgentHostFactory`.
+   - `POST /api/v1/deployments/trigger` rejects (`HTTP 400`) caller-supplied `ArtifactDownloadUrl` for `GitHubActionsArtifact` apps and forces `TriggeredAutomatically = false` on all external API requests.
+   - `DeploymentOrchestrator` fails closed in `GitHubActionsArtifact` mode without a server-side `IGitHubArtifactProvenanceVerifier` (or in-process `VerifiedGitHubArtifact` from `GitHubAutoDeployWorker`), verifies caller-supplied run/artifact IDs and digests against GitHub API truth, and strictly labels `ManualSignedPackage` as `LOCAL TEST ARTIFACT (ManualSignedPackage - NOT GitHub Provenance)` / `ManualSignedPackage`.
+   - `GitHubApiClient.IsTrustedGitHubArtifactUrl` enforces HTTPS GitHub host allowlisting (`api.github.com` / `github.com`).
+2. **Hardened Optional E2E Workflow (Critical Review Finding 3):**
+   - `/.github/workflows/e2e-disposable-iis.yml` remains strictly `workflow_dispatch`-only, separated from `build-windows-installers.yml`.
+   - Eliminated all direct `${{ inputs.* }}` interpolation into shell/PowerShell code; added pre-dispatch `validate-inputs-and-runner` job checking strict regex allowlists, unprivileged non-conflicting ports (`1024..65535`, never `9443`), rejecting `windows-latest` and production-like runner labels.
+   - Added GitHub Environment approval (`disposable-windows-iis-e2e`) and positive Windows host identity marker enforcement (`C:\ProgramData\ServerForgeE2E\DISPOSABLE_IIS_E2E_HOST.marker`).
+3. **Honest Split of TEST A vs TEST B + PowerShell 5.1/7 Audit (Critical Review Finding 1 & Phase 12.1A):**
+   - **TEST A (`run-deployment-tests.ps1` + `verify-rollback.ps1`)**: Explicitly uses `ManualSignedPackage` (`LOCAL TEST ARTIFACT`, `TriggeredAutomatically = false`), adds live negative provenance probe (`TESTA.SEC.1`), on-disk `web.config` check, and Agent restart resilience check. Explicitly reports `gitHubLivePollTested = false`.
+   - **TEST B (`run-github-autonomous-test.ps1`)**: New 18-step genuine autonomous GitHub Actions test with ZERO calls to `/api/v1/deployments/trigger`, pushing real commits (`v1`, `v2`, `v3-unhealthy`, `v4-recovery`) via GitHub Contents API to a disposable sample repo, waiting for real GitHub Actions runs/artifacts, proving `GitHubAutoDeployWorker` deploys with Desktop closed, auto-rolls back HTTP 503, resists endless retries across Agent restarts, and recovers on `v4`.
+   - Fixed `E2ECommon.psm1` for PowerShell 5.1 compatibility (`[string]::Empty` `X509Certificate2` overload + `WebRequestHandler.ServerCertificateValidationCallback` pinning fallback) and fixed sample app workflow to upload flat `./publish-out/**`.
+4. **Expanded Automated xUnit Suite (`38 → 42` tests, `0` skipped):**
+   - `+2` Unit tests (`DeploymentOrchestrator_GitHubActionsMode_RejectsLocalPath_UntrustedUrl_ForgedIds_AndDigestMismatch`, `GitHubApiClient_RejectsUntrustedArtifactDownloadHost_AndNonHttpsUrls`).
+   - `+2` Agent/mTLS tests (`LiveMtls_GitHubActionsMode_RejectsSpoofedLocalArtifact_ForgedIds_AndSpoofedAutoDeployFlag`, `AgentGitHubProvenanceVerifier_RejectsUnauthorizedRepo_BranchMismatch_MissingPat_AndForgedRunOrArtifactIds`).
+
+## Remaining External Gates (Must Stay Honestly Reported)
+1. **Windows CI Run #10:** Push Phase 12.1 commit and verify `42/42` xUnit + `50/50` smoke checks pass.
+2. **TEST A on Disposable Windows IIS VM:** `BLOCKED` until executed on a real disposable Windows Server IIS VM.
+3. **TEST B on Disposable Windows IIS VM + Disposable GitHub Repo:** `BLOCKED` until executed with a real disposable GitHub sample repo.
+4. **Interactive Windows 11 WPF Desktop Acceptance:** `NOT VERIFIED` until completed on Windows 11 (`WINDOWS_DESKTOP_ACCEPTANCE.md`).

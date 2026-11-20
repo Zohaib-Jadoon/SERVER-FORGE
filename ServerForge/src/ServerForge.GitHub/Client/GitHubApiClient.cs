@@ -263,6 +263,12 @@ public sealed class GitHubApiClient : IGitHubClient
                 $"Workflow run {matchingRunId} succeeded but produced no non-expired, non-empty deployment artifact.");
         }
 
+        if (!IsTrustedGitHubArtifactUrl(downloadUrl))
+        {
+            return new GitHubArtifactDownloadResult(false, null, null, trustedDigest, matchingRunId, artifactId, artifactName, null,
+                $"Refusing untrusted artifact download URL '{downloadUrl}'. Only HTTPS GitHub API artifact URLs are permitted.");
+        }
+
         // 3. Download archive and verify computed SHA-256 against GitHub API's trusted digest
         Directory.CreateDirectory(Path.GetDirectoryName(destinationZipPath)!);
         using var dlReq = CreateRequest(HttpMethod.Get, downloadUrl, personalAccessToken);
@@ -322,6 +328,18 @@ public sealed class GitHubApiClient : IGitHubClient
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         req.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
         return req;
+    }
+
+    public static bool IsTrustedGitHubArtifactUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            return false;
+        return uri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase) ||
+               uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase);
     }
 
     private static int ParseIntHeader(HttpResponseMessage resp, string name)

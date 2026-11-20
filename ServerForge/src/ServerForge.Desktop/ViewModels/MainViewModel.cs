@@ -669,9 +669,10 @@ public sealed partial class MainViewModel : ObservableObject
             ErrorMessage = "Enter the full 40-character Git commit SHA for the verified build artifact.";
             return;
         }
-        if (string.IsNullOrWhiteSpace(DeployArtifactPath) || string.IsNullOrWhiteSpace(DeployArtifactSha256))
+        var isManualPackage = SelectedApplication.SourceMode == DeploymentSourceMode.ManualSignedPackage;
+        if (isManualPackage && (string.IsNullOrWhiteSpace(DeployArtifactPath) || string.IsNullOrWhiteSpace(DeployArtifactSha256)))
         {
-            ErrorMessage = "Provide both the verified artifact package path/URL and its expected SHA-256 digest.";
+            ErrorMessage = "ManualSignedPackage mode requires both the verified local package path and its 64-character SHA-256 digest.";
             return;
         }
 
@@ -685,11 +686,11 @@ public sealed partial class MainViewModel : ObservableObject
                 Branch: string.IsNullOrWhiteSpace(DeployBranch) ? SelectedApplication.Branch : DeployBranch.Trim(),
                 CommitMessage: "Manual verified deployment from ServerForge Desktop",
                 CommitAuthor: Environment.UserName,
-                ArtifactDownloadUrl: DeployArtifactPath.Trim(),
-                ExpectedArtifactSha256: DeployArtifactSha256.Trim(),
+                ArtifactDownloadUrl: isManualPackage ? DeployArtifactPath.Trim() : null,
+                ExpectedArtifactSha256: string.IsNullOrWhiteSpace(DeployArtifactSha256) ? null : DeployArtifactSha256.Trim(),
                 TriggeredAutomatically: false,
                 RequestedBy: Environment.UserName,
-                ArtifactTrustSource: "DesktopVerifiedArtifact");
+                ArtifactTrustSource: isManualPackage ? "ManualSignedPackage" : null);
 
             var rec = await _agentTransport.TriggerDeploymentAsync(SelectedServer, req, CancellationToken.None);
             if (rec is not null)
