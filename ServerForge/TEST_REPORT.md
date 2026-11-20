@@ -1,32 +1,37 @@
 # ServerForge Test Report
 
-> **Strict Honesty Policy**: Only checks executed on real Windows runners are marked **PASSED**. Run #5 (`44688053844`) failed during `ServerForge.AgentTests` compilation (82 errors). All 3 root causes plus runtime/service hardening have been fixed on disk and await **Windows CI Run #6**. Interactive Windows 11 WPF GUI checks remain **NOT VERIFIED**, and live Windows Server VM IIS deployment/rollback checks remain **BLOCKED**.
+> **Strict Honesty Policy**: Only checks executed on real Windows runners are marked **PASSED**. Run #6 (`44689338386`) compiled cleanly and passed **30 / 32** xUnit tests on Windows. The 2 `SQLite Error 14` fixture failures are fixed on disk and await **Windows CI Run #7**, along with the first execution of `smoke-test-windows-installers`. Interactive Windows 11 WPF GUI checks remain **NOT VERIFIED**, and live Windows Server VM IIS deployment/rollback checks remain **BLOCKED**.
 
-## Verified Windows CI Run Evidence
-- **Run #4 (`44684923525`)** — `main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`: **PASSED** (`24/24` xUnit tests + both installers).
-- **Run #5 (`44688053844`)** — `d3a7a7d6d11e4c1a355e31a8f2995c28104bd859`: **FAILED AT COMPILE (82 errors in `ServerForge.AgentTests`)**
-  - `CS0103` (`Path`/`Directory`/`File` missing `using System.IO;` under `<UseWPF>true</UseWPF>`).
-  - `CS1061` / `CS8130` / `CS8183` (`TestDbContextFactory` missing explicit `CreateDbContextAsync` implementation).
-  - `CS1739` (`DatabaseHealthDto` invalid named parameter `DatabaseCount`).
-  - Zero tests executed and installer/smoke-test jobs did not run.
+## Verified Windows CI Run #6 Evidence (`44689338386`)
+- **Repository / Commit**: `Zohaib-Jadoon/SERVER-FORGE` @ `4ad417c383ae524ece90861a77e10e92f03c56f3`
+- **Run URL**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE/actions/runs/44689338386`
+- **Compilation**: **PASSED** (0 errors across all 11 projects + 3 test projects; zero NuGet advisories).
+- **Automated xUnit Results**: **30 / 32 PASSED**
+  - `ServerForge.UnitTests`: **22 / 22 PASSED**
+  - `ServerForge.IntegrationTests`: **1 / 1 PASSED**
+  - `ServerForge.AgentTests`: **7 / 9 PASSED**
+    - **PASSED on real Windows**: `AgentIdentityAndPairingTests` (1/1), `DesktopStartupAndViewModelTests` (3/3), and 3 live Kestrel HTTPS+mTLS tests (`LiveMtls_PairingCode...`, `LiveMtls_AuthenticatedRequests...`, `LiveMtls_CertificateRotation...`).
+    - **FAILED (2/9)**: `LiveMtls_PersistsAcrossAgentAndDesktopRestarts_AndRecoversAfterConnectionLoss` and `LiveMtls_MultipleServers_PairPersistAndCommunicateIndependently` threw `SQLite Error 14: unable to open database file` inside `CreateDesktopStoreAsync(string desktopDir)` because `Directory.CreateDirectory(desktopDir)` was omitted before opening SQLite.
+- **Installer Packaging & Smoke-Test Jobs**: Not reached in Run #6 due to those 2 test failures.
 
-## Automated Test & Verification Matrix (Post-Run #5 Fix Total: 32 xUnit Tests + 18 Installer Smoke Checks)
+## Automated Test & Verification Matrix (Total: 32 xUnit Tests + 18 Installer Smoke Checks)
 
-| Test Suite / Verification Area | Run #4 (`44684923525`) | Run #5 (`44688053844`) | Post-Fix Status | Notes |
-|---|---|---|---|---|
-| Full `.NET 10` solution compilation (`ServerForge.sln`) | **PASSED** | **FAILED (82 errors in `AgentTests`)** | **PENDING CI RUN #6** | All 3 compilation root causes fixed + `AgentHostFactory` Windows Service `ContentRootPath` fixed. |
-| NuGet vulnerability audit | **PASSED** | **PASSED** | **VERIFIED** | Zero advisories (`SQLitePCLRaw.lib.e_sqlite3`, `System.Security.Cryptography.Pkcs`). |
-| `SecurityAndValidationTests` (8 unit tests) | **8/8 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
-| `IisAndDatabaseSafetyTests` (4 unit tests) | **4/4 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
-| `DeploymentAndPersistenceTests` (10 unit tests) | **10/10 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
-| `AgentIdentityAndPairingTests` (1 test) | **1/1 PASSED** | Compile failed (`System.IO`) | **PENDING CI RUN #6** | Added `using System.IO;`. |
-| `WindowsPlatformIntegrationTests` (1 test) | **1/1 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
-| `DesktopToAgentMtlsIntegrationTests` (5 live Kestrel mTLS tests) | NEW | Compile failed (`System.IO`, `CreateDbContextAsync`) | **PENDING CI RUN #6** | Fixed `System.IO` & `TestDbContextFactory.CreateDbContextAsync`. |
-| `DesktopStartupAndViewModelTests` (3 Desktop startup/ViewModel tests) | NEW | Compile failed (`System.IO`, `CreateDbContextAsync`, `DatabaseCount`) | **PENDING CI RUN #6** | Fixed `System.IO`, `TestDbContextFactory`, `DatabaseHealthDto` 6-arg constructor, and DNS guidance assertion. |
-| Automated Windows Installer Smoke Tests (`smoke-test-installers.ps1` — 18 checks) | NEW | Not reached | **PENDING CI RUN #6** | Hardened `finally` cleanup & failure log capture + StrictMode variable scoping. |
-| Interactive Windows 11 WPF GUI Rendering & Tray UX | NOT RUN | NOT RUN | **NOT VERIFIED** | Manual checklist in `INSTALLATION.md` §5; not claimed by CI. |
-| Live Disposable Windows Server VM E2E (IIS deploy, autonomous push deploy, rollback) | NOT RUN | NOT RUN | **BLOCKED (Requires Windows Server VM)** | Reproducible sample app & 20-step runbook at `/ServerForge/samples/disposable-test-app/`. |
+| Test Suite / Verification Area | Run #6 (`44689338386`) | Post-Fix Status | Notes |
+|---|---|---|---|
+| Full `.NET 10` solution & WPF XAML compilation (`ServerForge.sln`) | **PASSED** | **VERIFIED (Run #6); RE-VERIFY RUN #7** | Zero compile errors and zero NuGet advisories. |
+| `SecurityAndValidationTests` (8 unit tests) | **8 / 8 PASSED** | **PASSED (Run #6)** | Pairing tokens, mTLS pinning, path guard, redaction, validators, `.env`, `Guid.Empty` `ProjectGroupId`. |
+| `IisAndDatabaseSafetyTests` (4 unit tests) | **4 / 4 PASSED** | **PASSED (Run #6)** | Unmanaged IIS read-only lock, binding conflicts, SQL/PG identifiers, approval-gated restore. |
+| `DeploymentAndPersistenceTests` (10 unit tests) | **10 / 10 PASSED** | **PASSED (Run #6)** | Provenance, rollback, SQLite FK, `DateTimeOffset` UTC ordering, pagination, versioned migrations & backup. |
+| `WindowsPlatformIntegrationTests` (1 test) | **1 / 1 PASSED** | **PASSED (Run #6)** | Real Windows DPAPI `CurrentUser` round-trip. |
+| `AgentIdentityAndPairingTests` (1 test) | **1 / 1 PASSED** | **PASSED (Run #6)** | Server cert generation, pairing persistence, cert rotation, rogue instance rejection. |
+| `DesktopStartupAndViewModelTests` (3 tests) | **3 / 3 PASSED** | **PASSED (Run #6)** | SetupWizard password validation + DPAPI self-test + skip-server + PBKDF2 persistence; 13-screen routing, theme persistence, SQLite CRUD, log filtering; isolated Demo Mode. |
+| `DesktopToAgentMtlsIntegrationTests` — 3 pairing/auth/rotation live Kestrel mTLS tests | **3 / 3 PASSED** | **PASSED (Run #6)** | Real Windows Schannel TLS + mTLS pairing, replay rejection, thumbprint pinning fail-closed, rogue/anonymous 403/401 rejection, live cert rotation revoking old cert. |
+| `DesktopToAgentMtlsIntegrationTests` — 2 restart/multi-server live Kestrel mTLS tests | **0 / 2 FAILED (`SQLite Error 14`)** | **FIXED — PENDING CI RUN #7** | Added `Directory.CreateDirectory(desktopDir);` in `CreateDesktopStoreAsync`. |
+| Automated Windows Installer Smoke Tests (`smoke-test-installers.ps1` — 18 checks) | Not reached | **PENDING CI RUN #7** | Hardened with production safety guards, unique per-run paths/service names, async Inno uninstaller & service `Wait-Until` polling, and Event Log capture. |
+| Interactive Windows 11 WPF GUI Rendering & Tray UX | NOT RUN | **NOT VERIFIED** | Manual checklist in `INSTALLATION.md` §5; never claimed by unattended CI. |
+| Live Disposable Windows Server VM E2E (IIS deploy, autonomous push deploy, rollback) | NOT RUN | **BLOCKED (Requires Windows Server VM)** | Reproducible sample app & 20-step runbook at `/ServerForge/samples/disposable-test-app/`. |
 
 ## Local Linux Container Static & Companion Checks
-- Audited all 3 `ServerForge.AgentTests` files, `AgentHostFactory.cs`, `AgentContracts.cs`, `Validators.cs`, and `smoke-test-installers.ps1`; confirmed `32` xUnit `[Fact]` tests remain enabled with zero disabled tests and zero TLS bypasses.
+- Audited every `UseSqlite` / `SqliteConnection` call in `ServerForge/src` and `ServerForge/tests` confirming parent directory creation and isolation from production metadata paths.
+- Audited `smoke-test-installers.ps1` for unique disposable names/paths, production guards, exception-safe cleanup, and PowerShell StrictMode safety.
 - `src/utils/solutionTree.test.ts` (`npx --yes tsx --test`): Verifies the read-only source explorer companion utilities only — never counted as Windows `.NET` verification.

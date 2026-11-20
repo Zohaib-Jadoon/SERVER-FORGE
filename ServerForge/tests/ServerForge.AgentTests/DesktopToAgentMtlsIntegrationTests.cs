@@ -34,6 +34,7 @@ public sealed class DesktopToAgentMtlsIntegrationTests
 
     private static async Task<ServerForgeStore> CreateDesktopStoreAsync(string desktopDir)
     {
+        Directory.CreateDirectory(desktopDir);
         var dbPath = Path.Combine(desktopDir, "desktop-test.db");
         var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
             .UseSqlite($"Data Source={dbPath}")
