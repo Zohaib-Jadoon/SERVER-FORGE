@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Serilog;
 using ServerForge.Agent.Configuration;
 using ServerForge.Agent.Workers;
@@ -92,7 +93,13 @@ public static class AgentHostFactory
         bool configureSerilog = true,
         CancellationToken cancellationToken = default)
     {
-        var builder = WebApplication.CreateBuilder(args);
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = args,
+            ContentRootPath = enableWindowsService && WindowsServiceHelpers.IsWindowsService()
+                ? AppContext.BaseDirectory
+                : default
+        });
 
         var agentOptions = overrideOptions
             ?? builder.Configuration.GetSection("Agent").Get<AgentOptions>()

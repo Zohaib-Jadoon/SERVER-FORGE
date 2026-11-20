@@ -1,47 +1,38 @@
 # ServerForge Build Report
 
-## Latest Verified Windows CI Run (Run #4 — `44684923525`)
-- **Repository**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE`
-- **GitHub Actions Run**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE/actions/runs/44684923525`
-- **Branch / Commit**: `main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`
-- **Workflow Trigger**: **SUCCEEDED** (`/.github/workflows/build-windows-installers.yml` on `windows-latest`)
-- **Verified Outcomes from Run `44684923525`**:
-  - Native `.NET 10` Windows solution compilation (`ServerForge.sln`): **PASSED**
-  - NuGet vulnerability audit: **PASSED** (zero reported advisories)
-  - Automated xUnit test suite: **24 / 24 PASSED**
-  - Self-contained `win-x64` Desktop & Agent publishing: **PASSED**
-  - Inno Setup 6 installer packaging: **PASSED**
-    - `ServerForge-Desktop-Setup.exe`: **GENERATED** (`~62.92 MB`, unsigned)
-    - `ServerForge-Agent-Setup.exe`: **GENERATED** (`~46.64 MB`, unsigned)
-    - `SHA256SUMS.txt`: **GENERATED**
-  - GitHub Actions artifact upload (`serverforge-windows-x64-installers`): **PASSED**
+## Latest Verified Windows CI History
+- **Run #4 (`44684923525`)** — `main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`: **PASSED**
+  - `.NET 10` compilation: PASSED, zero NuGet advisories.
+  - Automated xUnit tests: **24 / 24 PASSED**.
+  - Unsigned self-contained `win-x64` installers generated & uploaded: `ServerForge-Desktop-Setup.exe` (`~62.92 MB`), `ServerForge-Agent-Setup.exe` (`~46.64 MB`), `SHA256SUMS.txt`.
+- **Run #5 (`44688053844`)** — `d3a7a7d6d11e4c1a355e31a8f2995c28104bd859`: **FAILED (82 C# compiler errors in `ServerForge.AgentTests`)**
+  - `ServerForge.Desktop`, `ServerForge.Agent`, and all core/infrastructure libraries compiled cleanly, while `ServerForge.AgentTests` failed due to 3 root causes introduced in Phase 11:
+    1. **Missing `System.IO` directives (`CS0103` on `Path`/`Directory`/`File`)**: Adding `<UseWPF>true</UseWPF>` to `ServerForge.AgentTests.csproj` caused `Microsoft.NET.Sdk.WindowsDesktop` to suppress implicit `System.IO` global usings across all 3 test files (`AgentIdentityAndPairingTests.cs`, `DesktopToAgentMtlsIntegrationTests.cs`, `DesktopStartupAndViewModelTests.cs`).
+    2. **Default interface method invocation (`CS1061`, cascading `CS8130`/`CS8183`)**: `TestDbContextFactory` implemented `IDbContextFactory<ServerForgeDbContext>.CreateDbContext()` without explicitly implementing `CreateDbContextAsync`, and tests invoked `CreateDbContextAsync()` on the concrete type instead of the interface.
+    3. **Invalid DTO named parameter (`CS1739`)**: `DesktopStartupAndViewModelTests.cs` passed non-existent `DatabaseCount: 2` to `DatabaseHealthDto(Guid, string, DatabaseEngineType, bool, double, string?)`.
 
-## Phase 11 Changes Added After Run `44684923525` (Awaiting CI Run #5)
-1. **Desktop First-Launch & 13-Screen Runtime Hardening**:
-   - Fixed fatal WPF first-launch `ShutdownMode="OnMainWindowClose"` bug -> `ShutdownMode="OnExplicitShutdown"` with close-to-tray + explicit tray exit.
-   - Added global WPF crash handlers (`DispatcherUnhandledException`, `AppDomain.UnhandledException`, `TaskScheduler.UnobservedTaskException`) with Serilog logging & secret redaction (`ISecretProtector.RedactSecrets` optional `knownSecrets`).
-   - Added `ThemeManager` dynamic Dark/Light brush switching persisted to SQLite `LocalAdminProfile.DarkThemeEnabled`.
-   - Hardened `SetupWizardWindow` / `SetupWizardViewModel` (Confirm Password validation, `AddServerNow` skip toggle, `ServerDisplayName`, step-aware action label, `try/catch`).
-   - Audited & repaired all 13 WPF screens (`MainWindow` `Ctrl+,` shortcut, `GitHubView` Import to New App, `DeploymentsView` manual verified deploy + details pane, `LogsView` live `FilteredAuditLogs` + remote Agent audit sync, `DomainsSslView`/`EnvironmentVariablesView` Agent sync + delete, `DatabasesView` auto-port switching).
-2. **Windows Schannel mTLS Persistence & Live Kestrel Testability**:
-   - Extracted `AgentHostFactory` from `ServerForge.Agent/Program.cs` with configurable `AgentOptions.ServiceName`.
-   - Fixed Windows Schannel ephemeral private key persistence in `AgentIdentityStore` and `DesktopIdentityService` (`PersistKeySet | Exportable` PFX reload) and set `ClientCertificateOption.Manual` in `AgentTransportService`.
-   - Added 5 live Kestrel loopback HTTPS/mTLS integration tests + 3 Desktop startup/ViewModel tests (**32 total xUnit tests**).
-3. **Automated Windows Installer Smoke Tests & Release Quality**:
-   - Hardened `ServerForge-Agent.iss` (`SetupLogging=yes`, `/SERVICENAME=...` persisted to `{app}\service-name.txt` for uninstall, silent-safe `SuppressibleMsgBox` when IIS is absent) and `ServerForge-Desktop.iss` (`SetupLogging=yes`).
-   - Added `/ServerForge/scripts/smoke-test-installers.ps1` (8 Desktop + 10 Agent checks) and added `smoke-test-windows-installers` CI job in `/.github/workflows/build-windows-installers.yml`.
-   - Added disposable E2E sample app (`/ServerForge/samples/disposable-test-app/`) and `/ServerForge/scripts/verify-e2e-deployment.ps1`.
+## Repairs Applied After Run #5 (`44688053844`) — Awaiting Windows CI Run #6
+1. Added explicit `using System.IO;` to `AgentIdentityAndPairingTests.cs`, `DesktopToAgentMtlsIntegrationTests.cs`, and `DesktopStartupAndViewModelTests.cs` while preserving `<Using Remove="System.Windows.Forms" />` and `<Using Remove="System.Drawing" />` collision protections.
+2. Explicitly implemented `CreateDbContextAsync(CancellationToken)` on `TestDbContextFactory` and typed `factory` as `IDbContextFactory<ServerForgeDbContext>` in both `DesktopToAgentMtlsIntegrationTests.cs` and `DesktopStartupAndViewModelTests.cs`.
+3. Fixed `DatabaseHealthDto` constructor call in `DesktopStartupAndViewModelTests.cs` to match the 6-parameter contract without modifying production contracts.
+4. Fixed a pre-detected runtime assertion mismatch in `DesktopStartupAndViewModelTests.cs` (`DomainValidator.BuildManualDnsInstructions` emits `"Host / Name: orders"`, not the full FQDN).
+5. Fixed `AgentHostFactory.cs` to set `WebApplicationOptions.ContentRootPath = AppContext.BaseDirectory` when `WindowsServiceHelpers.IsWindowsService()` is true so the installed `ServerForge.Agent` Windows Service always reads `appsettings.json` from its install directory instead of `C:\Windows\System32`.
+6. Hardened `ServerForge/scripts/smoke-test-installers.ps1` `finally` block (and StrictMode variable scope) so disposable services, installers, temp directories, and Agent failure logs are always cleaned up and captured even if a mid-run assertion throws.
 
 ## Signing & Environment Transparency
-- **Installers are UNSIGNED**: No Authenticode code-signing certificate is configured in CI; Windows SmartScreen warnings are expected until verified via `SHA256SUMS.txt` or signed by the operator.
-- **Google AI Studio Container**: Linux x64 (`gVisor`) without `.NET 10` Windows SDK, `ISCC.exe`, or GitHub push credentials. All Phase 11 `.NET` compilation, `32/32` xUnit execution, and installer smoke tests must execute on GitHub Actions `windows-latest` (Run #5).
+- **Installers are UNSIGNED**: No Authenticode certificate is configured in CI; verify `SHA256SUMS.txt` before execution or sign with an operator-owned certificate.
+- **Google AI Studio Container**: Linux x64 (`gVisor`) without `.NET 10` Windows SDK, `ISCC.exe`, or GitHub push credentials. Push to `Zohaib-Jadoon/SERVER-FORGE` to execute Windows CI Run #6.
 
-## Next Steps to Trigger Windows CI Run #5
+## Next Steps to Trigger Windows CI Run #6
 ```powershell
-git checkout -b feat/phase11-runtime-verification
+git checkout -b fix/phase11-ci-run6
 # Extract updated archive into repository root, preserving /.github/workflows/build-windows-installers.yml
-git status
-git add .github/workflows/build-windows-installers.yml ServerForge/
-git commit -m "Phase 11: Desktop/mTLS runtime hardening, live Kestrel mTLS tests, automated installer smoke tests, and disposable E2E sample"
-git push -u origin feat/phase11-runtime-verification
+git add ServerForge/tests/ServerForge.AgentTests/ `
+        ServerForge/src/ServerForge.Agent/AgentHostFactory.cs `
+        ServerForge/scripts/smoke-test-installers.ps1 `
+        ServerForge/MEMORY.md ServerForge/BUILD_REPORT.md `
+        ServerForge/TEST_REPORT.md ServerForge/DEVELOPMENT_STATUS.md `
+        ServerForge/PRODUCTION_READINESS_REPORT.md
+git commit -m "Fix Phase 11 AgentTests compilation errors (System.IO, IDbContextFactory async, DatabaseHealthDto), Agent service ContentRootPath, and smoke-test cleanup"
+git push -u origin fix/phase11-ci-run6
 ```

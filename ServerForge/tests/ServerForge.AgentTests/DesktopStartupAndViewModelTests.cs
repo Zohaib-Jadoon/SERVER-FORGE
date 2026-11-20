@@ -1,3 +1,4 @@
+using System.IO;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -25,6 +26,9 @@ public sealed class DesktopStartupAndViewModelTests
         : IDbContextFactory<ServerForgeDbContext>
     {
         public ServerForgeDbContext CreateDbContext() => new(options);
+
+        public Task<ServerForgeDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(CreateDbContext());
     }
 
     private static async Task<(ServerForgeStore Store, DpapiSecretProtector Protector, AgentTransportService Transport)> CreateDesktopEnvironmentAsync(string tempDir)
@@ -34,7 +38,7 @@ public sealed class DesktopStartupAndViewModelTests
         var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
             .UseSqlite($"Data Source={dbPath}")
             .Options;
-        var factory = new TestDbContextFactory(opts);
+        IDbContextFactory<ServerForgeDbContext> factory = new TestDbContextFactory(opts);
         await using (var db = await factory.CreateDbContextAsync())
             await db.InitializeSqliteAsync();
 
@@ -140,7 +144,7 @@ public sealed class DesktopStartupAndViewModelTests
             var sqlMock = new Mock<ISqlServerManager>();
             sqlMock.Setup(m => m.TestConnectionAsync(It.IsAny<DatabaseServerRecord>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync((DatabaseServerRecord r, string _, CancellationToken _) =>
-                    new DatabaseHealthDto(r.Id, r.DisplayName, r.Engine, Reachable: true, LatencyMs: 4.2, DatabaseCount: 2, ErrorMessage: null));
+                    new DatabaseHealthDto(r.Id, r.DisplayName, r.Engine, Reachable: true, LatencyMs: 4.2, ErrorMessage: null));
             var pgMock = new Mock<IPostgreSqlManager>();
 
             var vm = new MainViewModel(store, githubMock.Object, transport, sqlMock.Object, pgMock.Object);
@@ -192,7 +196,8 @@ public sealed class DesktopStartupAndViewModelTests
             vm.NewDomainHostname = "orders.example.internal";
             await vm.AddDomainBindingCommand.ExecuteAsync(null);
             Assert.Single(vm.Domains);
-            Assert.Contains("orders.example.internal", vm.DnsGuidanceOutput);
+            Assert.Contains("Host / Name: orders", vm.DnsGuidanceOutput);
+            Assert.Contains("orders.example.internal", vm.StatusMessage);
 
             vm.NewDbEngine = DatabaseEngineType.PostgreSqlExternalManaged;
             Assert.Equal(5432, vm.NewDbPort);

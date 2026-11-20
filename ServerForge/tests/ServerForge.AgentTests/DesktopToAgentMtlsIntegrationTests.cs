@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -26,6 +27,9 @@ public sealed class DesktopToAgentMtlsIntegrationTests
         : IDbContextFactory<ServerForgeDbContext>
     {
         public ServerForgeDbContext CreateDbContext() => new(options);
+
+        public Task<ServerForgeDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(CreateDbContext());
     }
 
     private static async Task<ServerForgeStore> CreateDesktopStoreAsync(string desktopDir)
@@ -34,7 +38,7 @@ public sealed class DesktopToAgentMtlsIntegrationTests
         var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
             .UseSqlite($"Data Source={dbPath}")
             .Options;
-        var factory = new TestDbContextFactory(opts);
+        IDbContextFactory<ServerForgeDbContext> factory = new TestDbContextFactory(opts);
         await using (var db = await factory.CreateDbContextAsync())
             await db.InitializeSqliteAsync();
         return new ServerForgeStore(factory, new DpapiSecretProtector(DataProtectionScope.CurrentUser));

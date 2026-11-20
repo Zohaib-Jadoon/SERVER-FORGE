@@ -1,31 +1,32 @@
 # ServerForge Test Report
 
-> **Strict Honesty Policy**: Only checks executed on real Windows runners are marked **PASSED**. New or modified Phase 11 tests and smoke tests awaiting Run #5 are marked **PENDING WINDOWS CI RUN #5**. Interactive Windows 11 WPF GUI checks are marked **NOT VERIFIED**, and live Windows Server VM IIS deployment/rollback checks are marked **BLOCKED (Requires Disposable Windows Server VM)**.
+> **Strict Honesty Policy**: Only checks executed on real Windows runners are marked **PASSED**. Run #5 (`44688053844`) failed during `ServerForge.AgentTests` compilation (82 errors). All 3 root causes plus runtime/service hardening have been fixed on disk and await **Windows CI Run #6**. Interactive Windows 11 WPF GUI checks remain **NOT VERIFIED**, and live Windows Server VM IIS deployment/rollback checks remain **BLOCKED**.
 
-## Verified Windows CI Run #4 Baseline (`44684923525`)
-- **Repository / Commit**: `Zohaib-Jadoon/SERVER-FORGE` (`main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`)
-- **Run URL**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE/actions/runs/44684923525`
-- **Compilation**: **PASSED** (`.NET 10` solution & WPF XAML compiled cleanly; zero NuGet advisories).
-- **Test Results**: **24 / 24 PASSED** (`22/22` Unit, `1/1` Agent, `1/1` Integration).
-- **Installer Packaging**: **PASSED** (`ServerForge-Desktop-Setup.exe` ~62.92 MB, `ServerForge-Agent-Setup.exe` ~46.64 MB, `SHA256SUMS.txt`).
+## Verified Windows CI Run Evidence
+- **Run #4 (`44684923525`)** — `main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`: **PASSED** (`24/24` xUnit tests + both installers).
+- **Run #5 (`44688053844`)** — `d3a7a7d6d11e4c1a355e31a8f2995c28104bd859`: **FAILED AT COMPILE (82 errors in `ServerForge.AgentTests`)**
+  - `CS0103` (`Path`/`Directory`/`File` missing `using System.IO;` under `<UseWPF>true</UseWPF>`).
+  - `CS1061` / `CS8130` / `CS8183` (`TestDbContextFactory` missing explicit `CreateDbContextAsync` implementation).
+  - `CS1739` (`DatabaseHealthDto` invalid named parameter `DatabaseCount`).
+  - Zero tests executed and installer/smoke-test jobs did not run.
 
-## Phase 11 Automated Test & Verification Matrix (Post-Phase 11 Total: 32 xUnit Tests + 18 Installer Smoke Checks)
+## Automated Test & Verification Matrix (Post-Run #5 Fix Total: 32 xUnit Tests + 18 Installer Smoke Checks)
 
-| Test Suite / Verification Area | Run `44684923525` | Current Status | Notes |
-|---|---|---|---|
-| Full `.NET 10` solution & WPF XAML compilation (`ServerForge.sln`) | **PASSED** | **PENDING CI RUN #5** | Re-verification required after Phase 11 Desktop & Agent edits. |
-| NuGet transitive vulnerability audit | **PASSED** | **VERIFIED** | Zero advisories (`SQLitePCLRaw.lib.e_sqlite3`, `System.Security.Cryptography.Pkcs`). |
-| `SecurityAndValidationTests` (8 unit tests) | **8/8 PASSED** | **PASSED (Run `44684923525`)** | Pairing tokens, mTLS pinning, path guard, redaction, validators, `.env`, `Guid.Empty` `ProjectGroupId`. |
-| `IisAndDatabaseSafetyTests` (4 unit tests) | **4/4 PASSED** | **PASSED (Run `44684923525`)** | Unmanaged IIS read-only lock, binding conflicts, SQL/PG identifiers, approval-gated restore. |
-| `DeploymentAndPersistenceTests` (10 unit tests) | **10/10 PASSED** | **PASSED (Run `44684923525`)** | Provenance, rollback, SQLite FK, `DateTimeOffset` UTC ordering, pagination, versioned migrations & backup. |
-| `AgentIdentityAndPairingTests` (1 test) | **1/1 PASSED** | **PASSED (Run `44684923525`)** | Server cert generation, pairing persistence, Desktop cert rotation, rogue instance rejection. |
-| `WindowsPlatformIntegrationTests` (1 test) | **1/1 PASSED** | **PASSED (Run `44684923525`)** | Real Windows DPAPI `CurrentUser` round-trip on `windows-latest`. |
-| `DesktopToAgentMtlsIntegrationTests` (**5 NEW live Kestrel mTLS tests**) | **NEW** | **PENDING CI RUN #5** | Live loopback HTTPS+mTLS: one-time pairing & replay rejection, wrong thumbprint pinning fail-closed, authenticated calls + rogue/anonymous 403/401 rejection, Agent & Desktop restart persistence + connection loss recovery, live cert rotation invalidating old cert, and multi-server pairing. |
-| `DesktopStartupAndViewModelTests` (**3 NEW Desktop startup/ViewModel tests**) | **NEW** | **PENDING CI RUN #5** | SetupWizard password validation + DPAPI self-test + skip-server jump + PBKDF2 persistence; MainViewModel 13-screen routing, theme persistence, SQLite CRUD, log filtering; isolated Demo Mode. |
-| Automated Windows Installer Smoke Tests (`smoke-test-installers.ps1` — 8 Desktop + 10 Agent checks) | **NEW** | **PENDING CI RUN #5** | Runs in new `smoke-test-windows-installers` CI job: SHA-256 check, silent install, self-contained runtime, uninstall registry, `ServerForgeAgentSmoke` Windows Service running/auto/recovery, loopback-only `127.0.0.1:9443`, restart identity preservation, upgrade config preservation, clean uninstall preserving `C:\ServerForgeApps` & `%LOCALAPPDATA%\ServerForge`. |
-| Interactive Windows 11 WPF GUI Rendering & Tray UX | **NOT RUN** | **NOT VERIFIED** | Unattended CI does NOT verify interactive WPF GUI; requires manual Windows 11 checklist (`INSTALLATION.md` §5). |
-| Live Disposable Windows Server VM E2E (IIS deploy, autonomous push deploy while Desktop closed, rollback with `SIMULATE_UNHEALTHY=true`, unmanaged IIS untouched) | **NOT RUN** | **BLOCKED (Requires Windows Server VM)** | Reproducible sample app & 20-step runbook provided at `/ServerForge/samples/disposable-test-app/`. |
+| Test Suite / Verification Area | Run #4 (`44684923525`) | Run #5 (`44688053844`) | Post-Fix Status | Notes |
+|---|---|---|---|---|
+| Full `.NET 10` solution compilation (`ServerForge.sln`) | **PASSED** | **FAILED (82 errors in `AgentTests`)** | **PENDING CI RUN #6** | All 3 compilation root causes fixed + `AgentHostFactory` Windows Service `ContentRootPath` fixed. |
+| NuGet vulnerability audit | **PASSED** | **PASSED** | **VERIFIED** | Zero advisories (`SQLitePCLRaw.lib.e_sqlite3`, `System.Security.Cryptography.Pkcs`). |
+| `SecurityAndValidationTests` (8 unit tests) | **8/8 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
+| `IisAndDatabaseSafetyTests` (4 unit tests) | **4/4 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
+| `DeploymentAndPersistenceTests` (10 unit tests) | **10/10 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
+| `AgentIdentityAndPairingTests` (1 test) | **1/1 PASSED** | Compile failed (`System.IO`) | **PENDING CI RUN #6** | Added `using System.IO;`. |
+| `WindowsPlatformIntegrationTests` (1 test) | **1/1 PASSED** | Not reached | **PENDING CI RUN #6** | Previously passed in Run #4. |
+| `DesktopToAgentMtlsIntegrationTests` (5 live Kestrel mTLS tests) | NEW | Compile failed (`System.IO`, `CreateDbContextAsync`) | **PENDING CI RUN #6** | Fixed `System.IO` & `TestDbContextFactory.CreateDbContextAsync`. |
+| `DesktopStartupAndViewModelTests` (3 Desktop startup/ViewModel tests) | NEW | Compile failed (`System.IO`, `CreateDbContextAsync`, `DatabaseCount`) | **PENDING CI RUN #6** | Fixed `System.IO`, `TestDbContextFactory`, `DatabaseHealthDto` 6-arg constructor, and DNS guidance assertion. |
+| Automated Windows Installer Smoke Tests (`smoke-test-installers.ps1` — 18 checks) | NEW | Not reached | **PENDING CI RUN #6** | Hardened `finally` cleanup & failure log capture + StrictMode variable scoping. |
+| Interactive Windows 11 WPF GUI Rendering & Tray UX | NOT RUN | NOT RUN | **NOT VERIFIED** | Manual checklist in `INSTALLATION.md` §5; not claimed by CI. |
+| Live Disposable Windows Server VM E2E (IIS deploy, autonomous push deploy, rollback) | NOT RUN | NOT RUN | **BLOCKED (Requires Windows Server VM)** | Reproducible sample app & 20-step runbook at `/ServerForge/samples/disposable-test-app/`. |
 
 ## Local Linux Container Static & Companion Checks
-- Static audit performed on all C#, XAML, Inno Setup `.iss` (Pascal Script), PowerShell `.ps1`, and YAML CI workflow files.
-- `src/utils/solutionTree.test.ts` (`npx --yes tsx --test`): Verifies the read-only source explorer companion utilities only — NEVER counted as native Windows `.NET` runtime verification.
+- Audited all 3 `ServerForge.AgentTests` files, `AgentHostFactory.cs`, `AgentContracts.cs`, `Validators.cs`, and `smoke-test-installers.ps1`; confirmed `32` xUnit `[Fact]` tests remain enabled with zero disabled tests and zero TLS bypasses.
+- `src/utils/solutionTree.test.ts` (`npx --yes tsx --test`): Verifies the read-only source explorer companion utilities only — never counted as Windows `.NET` verification.

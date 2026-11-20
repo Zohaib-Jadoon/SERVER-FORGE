@@ -1,3 +1,4 @@
+using System.IO;
 using ServerForge.Agent.Configuration;
 using Xunit;
 

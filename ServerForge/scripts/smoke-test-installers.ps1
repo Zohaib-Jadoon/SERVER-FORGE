@@ -85,6 +85,7 @@ foreach ($line in $checksumLines) {
 # Launch a benign unrelated background process to verify CloseApplicationsFilter NEVER terminates unrelated apps
 $canaryProc = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 300' -PassThru -WindowStyle Hidden
 Write-CheckLog "Started unrelated canary process PID=$($canaryProc.Id) to verify CloseApplicationsFilter safety."
+$hostedAppMarkerDir = 'C:\ServerForgeApps\smoke-hosted-app'
 
 try {
     # =========================================================================
@@ -155,7 +156,6 @@ try {
     $agentUpgradeLog = Join-Path $LogOutputDir 'agent-upgrade.log'
     $agentUninstallLog = Join-Path $LogOutputDir 'agent-uninstall.log'
     $agentProgramData = 'C:\ProgramData\ServerForge\Agent'
-    $hostedAppMarkerDir = 'C:\ServerForgeApps\smoke-hosted-app'
     $hostedAppMarkerFile = Join-Path $hostedAppMarkerDir 'index.html'
 
     Write-CheckLog '--- PART 2: ServerForge Agent Installer ---'
@@ -262,10 +262,42 @@ try {
     Write-CheckLog "=================================================================="
 }
 finally {
+    # Always capture any Agent logs for diagnostics even if an earlier check threw
+    $agentLogDir = 'C:\ProgramData\ServerForge\Agent\logs'
+    if (Test-Path $agentLogDir) {
+        foreach ($lf in @(Get-ChildItem -Path $agentLogDir -Filter 'agent-*.log' -ErrorAction SilentlyContinue)) {
+            Copy-Item -Path $lf.FullName -Destination (Join-Path $LogOutputDir $lf.Name) -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Ensure disposable Agent service is stopped & uninstalled even on mid-run failure
+    $leftoverSvc = Get-Service -Name $DisposableAgentServiceName -ErrorAction SilentlyContinue
+    if ($null -ne $leftoverSvc) {
+        Write-CheckLog "Cleanup: stopping and removing leftover disposable service '$DisposableAgentServiceName'." 'WARN'
+        Stop-Service -Name $DisposableAgentServiceName -Force -ErrorAction SilentlyContinue
+        $fallbackAgentUnins = Join-Path (Join-Path $DisposableRoot 'AgentApp') 'unins000.exe'
+        if (Test-Path $fallbackAgentUnins) {
+            Start-Process -FilePath $fallbackAgentUnins -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -ErrorAction SilentlyContinue
+        }
+        if ($null -ne (Get-Service -Name $DisposableAgentServiceName -ErrorAction SilentlyContinue)) {
+            & sc.exe delete $DisposableAgentServiceName | Out-Null
+        }
+    }
+
+    # Ensure disposable Desktop install is uninstalled even on mid-run failure
+    $fallbackDesktopUnins = Join-Path (Join-Path $DisposableRoot 'DesktopApp') 'unins000.exe'
+    if (Test-Path $fallbackDesktopUnins) {
+        Write-CheckLog 'Cleanup: uninstalling leftover disposable Desktop installation.' 'WARN'
+        Start-Process -FilePath $fallbackDesktopUnins -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -ErrorAction SilentlyContinue
+    }
+
     if ($canaryProc -and -not $canaryProc.HasExited) {
         Stop-Process -Id $canaryProc.Id -Force -ErrorAction SilentlyContinue
     }
-    # Clean up disposable smoke marker directory only
+
+    # Clean up disposable smoke markers & temp directories only (never touch real production data)
+    $desktopMarkerCleanup = Join-Path (Join-Path $env:LOCALAPPDATA 'ServerForge') 'smoke-upgrade-marker.txt'
+    Remove-Item -Path $desktopMarkerCleanup -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $hostedAppMarkerDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $DisposableRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
