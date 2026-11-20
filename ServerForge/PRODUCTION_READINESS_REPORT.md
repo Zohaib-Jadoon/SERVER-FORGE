@@ -1,8 +1,9 @@
-# ServerForge — Production Readiness Report (Phase 12.2)
+# ServerForge — Production Readiness Report (Phase 12.2 — Run #12 Repair)
 
 **Overall Status:** **NOT PRODUCTION-READY**  
-**Last Verified Windows CI Run:** Run #10 (`44720053575`) @ commit `5226d810789413e01775c9e9f4e0348d080e6b61`  
-**Phase 12.2 Status:** Autonomous ETag/artifact-readiness fix (SQLite schema v3), strict workflow/artifact identity & safe redirect/ZIP hardening, single safe disposable IIS entry point (`run-disposable-iis-acceptance.ps1`), and `+6` regression tests (`48` total enabled, `0` skipped) complete on disk — pending Windows CI Run #11 and external Windows IIS / Windows 11 acceptance runs.
+**Last Verified Green Windows CI Run:** Run #10 (`44720053575`) @ commit `5226d810789413e01775c9e9f4e0348d080e6b61` (`42/42` xUnit + `50/50` smoke)  
+**Failed Windows CI Run:** Run #11 (`44739965264`) @ commit `1ae32e9b4224373c8cc568aa965ab3b3954cac6f` (`19` C# compilation errors in the 6 new Phase 12.2 tests; no installers generated)  
+**Current Working State:** All 19 test compilation errors repaired on disk (`48` total enabled xUnit tests, `0` skipped) — pending **Windows CI Run #12** and external Windows IIS / Windows 11 acceptance runs.
 
 ---
 
@@ -10,14 +11,14 @@
 
 | # | Release Gate | Status | Evidence / Required Action |
 | --- | --- | --- | --- |
-| **1** | **Windows `.NET 10` Build, Automated Tests & Installers** | **VERIFIED AT RUN #10 (`42/42` + `50/50`) — PHASE 12.2 (`48` TESTS) PENDING CI RUN #11** | Run #10 (`44720053575`) passed all 42 xUnit tests (including server-side GitHub provenance rejection), installer builds, SHA-256 checksums, and 50/50 smoke assertions. Push Phase 12.2 to verify **48/48** xUnit + **50/50** smoke in Run #11. |
+| **1** | **Windows `.NET 10` Build, Automated Tests & Installers** | **VERIFIED AT RUN #10 (`42/42` + `50/50`); FAILED RUN #11 (19 TEST ERRORS) — REPAIRED PENDING CI RUN #12** | Run #10 (`44720053575`) passed all 42 xUnit tests, installers, SHA-256 checksums, and 50/50 smoke assertions. All 19 Run #11 test compile errors (`LoopbackSampleIisHost`, `CreateSampleAspNetCoreArtifactAsync`, `UpdateState`, `CS9007`) are fixed on disk — push to verify **48/48** xUnit + **50/50** smoke in Run #12. |
 | **2** | **TEST A — Locally Built Sample Artifact Deployed to Real IIS** | **BLOCKED (REQUIRES DISPOSABLE WINDOWS IIS VM)** | Single safe entry point `run-disposable-iis-acceptance.ps1` + PS 5.1/7 scripts ready (`ManualSignedPackage`, `LOCAL TEST ARTIFACT`, live provenance guard probe, `web.config` check, HTTP 503 rollback, Agent restart resilience). Must execute on a disposable Windows IIS VM marked `SERVERFORGE_DISPOSABLE_E2E_HOST=true`. |
-| **3** | **TEST B — Real GitHub Actions Autonomous Deployment & Rollback** | **BLOCKED (REQUIRES DISPOSABLE WINDOWS IIS VM + DISPOSABLE GITHUB REPO)** | `run-disposable-iis-acceptance.ps1 -IncludeTestB` / `run-github-autonomous-test.ps1` implements all 18 steps with 0 `/api/v1/deployments/trigger` calls and now exercises the Phase 12.2 HTTP 304 decoupled polling worker. Must execute against a disposable GitHub repo on a disposable Windows IIS VM. |
+| **3** | **TEST B — Real GitHub Actions Autonomous Deployment & Rollback** | **BLOCKED (REQUIRES DISPOSABLE WINDOWS IIS VM + DISPOSABLE GITHUB REPO)** | `run-disposable-iis-acceptance.ps1 -IncludeTestB` / `run-github-autonomous-test.ps1` implements all 18 steps with 0 `/api/v1/deployments/trigger` calls and exercises the Phase 12.2 HTTP 304 decoupled polling worker. Must execute against a disposable GitHub repo on a disposable Windows IIS VM. |
 | **4** | **Interactive Windows 11 WPF Desktop GUI Acceptance** | **NOT VERIFIED** | 17-point interactive checklist in `WINDOWS_DESKTOP_ACCEPTANCE.md` covering all 13 native WPF screens, themes, backups, and close-to-tray. Requires interactive Windows 11 testing. |
 
 ---
 
-## Security, Reliability & Trust Boundary Controls Verified in Code (Phase 12.1 + 12.2)
+## Security, Reliability & Trust Boundary Controls Preserved in Code (Phase 12.1 + 12.2)
 
 - **Decoupled Autonomous Polling & Crash-Safe Candidate Persistence:** `GitHubAutoDeployWorker` decouples branch-head ETag tracking (`LastBranchHeadETag`) from durable per-application candidate readiness in SQLite (`AutonomousDeploymentCandidates`, schema v3 with automatic pre-upgrade `.bak` backup). Commits detected while GitHub Actions is still running keep checking artifact readiness even under **HTTP 304 Not Modified**, survive Agent restarts, allow newer commits to supersede older pending commits, enforce bounded backoff & rate-limit pauses (`Retry-After` / `X-RateLimit-Reset`), and prevent duplicate/in-flight/endless-failed retries.
 - **Strict Workflow & Artifact Identity (`GitHubApiClient`):** Enforces exact authorized `owner/repo`, exact branch + 40-char commit SHA, and exact non-blank workflow path — resolving `GET repos/{repo}/actions/workflows/{workflow_id}` whenever `path` is missing from workflow run list responses. Fails closed on ambiguous multi-artifact runs instead of picking the first artifact.
@@ -30,7 +31,7 @@
 
 ## Conditions Required Before Declaring Production-Ready
 
-1. Windows CI Run #11 (`build-windows-installers.yml`) completes **GREEN** with **48/48** xUnit tests and **50/50** installer smoke checks.
+1. Windows CI Run #12 (`build-windows-installers.yml`) completes **GREEN** with **48/48** xUnit tests, both installers + `SHA256SUMS.txt`, and **50/50** installer smoke checks.
 2. **TEST A** passes on a genuine disposable Windows Server IIS VM with sanitized `deployment-evidence.json` and `rollback-evidence.json` recorded in `E2E_ACCEPTANCE_REPORT.md`.
 3. **TEST B** passes on a genuine disposable Windows Server IIS VM + disposable GitHub repo with real `workflowRunId`, `artifactId`, `commitSha`, and `deploymentId` recorded in `github-autonomous-evidence.json` and `E2E_ACCEPTANCE_REPORT.md`.
 4. **Interactive Windows 11 Desktop Acceptance** (`WINDOWS_DESKTOP_ACCEPTANCE.md`) passes all 17 checks across all 13 native WPF screens with zero blocking defects.

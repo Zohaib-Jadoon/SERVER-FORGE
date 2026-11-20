@@ -106,7 +106,7 @@ Unattended GitHub Actions `windows-latest` runners verify installer execution, s
 - [ ] **NOT VERIFIED** — Navigate all 13 screens (`Ctrl+1`..`Ctrl+9`, `Ctrl+M`, `Ctrl+L`, `Ctrl+B`, `Ctrl+,`) and verify zero unhandled exceptions or clipped controls.
 - [ ] **NOT VERIFIED** — Click window Close (`X`) -> verify app minimizes to system tray -> double-click tray icon to reopen -> right-click tray icon -> Exit cleanly.
 - [ ] **NOT VERIFIED** — Pair a live disposable Windows Server Agent over private VPN -> restart Desktop -> confirm automatic mTLS reconnection without re-pairing.
-- [ ] **NOT VERIFIED** — Execute **TEST A** (local sample artifact on real IIS) and **TEST B** (real GitHub Actions autonomous push-to-IIS deploy & rollback with Desktop closed) on a disposable Windows Server IIS VM via `ServerForge/scripts/e2e/run-disposable-iis-acceptance.ps1` per `/ServerForge/DISPOSABLE_IIS_TEST_GUIDE.md`.
+- [ ] **NOT VERIFIED** — Execute **TEST A** (local sample artifact on real IIS) and **TEST B** (real GitHub Actions autonomous push-to-IIS deploy & rollback with Desktop closed) on a **disposable** Windows Server IIS VM marked `C:\ProgramData\ServerForgeE2E\DISPOSABLE_IIS_E2E_HOST.marker` = `SERVERFORGE_DISPOSABLE_E2E_HOST=true` via `ServerForge/scripts/e2e/run-disposable-iis-acceptance.ps1 -AgentInstallerPath <path> -ConfirmDisposableHost` (plus `-IncludeTestB -GitHubRepo <owner/disposable-repo> -GitHubBranch main` for TEST B) per `/ServerForge/DISPOSABLE_IIS_TEST_GUIDE.md`.
 
 ### Phase 12.2 Acceptance Guides & Evidence Templates
 - **Full 13-Screen Interactive Windows 11 WPF Runbook**: `/ServerForge/WINDOWS_DESKTOP_ACCEPTANCE.md`

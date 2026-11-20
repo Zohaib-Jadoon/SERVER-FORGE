@@ -846,27 +846,24 @@ public sealed class AutonomousDeploymentAndRollbackTests
         Directory.CreateDirectory(appsRoot);
         Directory.CreateDirectory(artifactsDir);
 
-        await using var targetHost = new LoopbackSampleIisHost();
-        await targetHost.StartAsync();
+        await using var targetHost = await LiveLoopbackTargetHost.StartAsync();
 
         try
         {
-            var (v1Zip, v1Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v1.zip", "2.1.0-after-304", unhealthy: false);
+            var (v1Zip, v1Sha) = await CreateAspNetCoreSampleArtifactAsync(
+                artifactsDir, "v1.zip", "2.1.0-after-304", CommitV1, bakeUnhealthyWebConfig: false);
 
             var dbPath = Path.Combine(dataRoot, "agent-state.db");
             var dbOpts = new DbContextOptionsBuilder<ServerForgeDbContext>().UseSqlite($"Data Source={dbPath}").Options;
-            await using (var initDb = new ServerForgeDbContext(dbOpts))
+            IDbContextFactory<ServerForgeDbContext> factory = new TestDbContextFactory(dbOpts);
+            await using (var initDb = await factory.CreateDbContextAsync())
                 await initDb.InitializeSqliteAsync();
 
-            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
-            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
-                .ReturnsAsync(() => new ServerForgeDbContext(dbOpts));
-
             var protector = new DpapiSecretProtector(DataProtectionScope.CurrentUser);
-            var store = new ServerForgeStore(factoryMock.Object, protector);
+            var store = new ServerForgeStore(factory, protector);
             var agentOpts = new AgentOptions { DataRoot = dataRoot, AppsRoot = appsRoot };
             var identityStore = new AgentIdentityStore(agentOpts);
-            identityStore.UpdateState(s => s.ProtectedGitHubPat = protector.Protect("github_pat_etag304_test", "agent:github-pat"));
+            identityStore.StoreProtectedGitHubPat(protector.Protect("github_pat_etag304_test", "agent:github-pat"));
 
             var proj = await store.EnsureDefaultProjectAsync("test");
             var app = new ManagedApplication
@@ -876,6 +873,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 Name = "ETag 304 Autonomous App",
                 Slug = "etag-304-app",
                 RuntimeType = ApplicationRuntimeType.AspNetCore,
+                ManagementState = ResourceManagementState.ServerForgeCreated,
                 RepositoryFullName = "owner/etag-304-app",
                 Branch = "main",
                 AutoDeployEnabled = true,
@@ -957,6 +955,8 @@ public sealed class AutonomousDeploymentAndRollbackTests
             Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, c4!.State);
             Assert.Equal(8001L, c4.ArtifactId);
             Assert.NotNull(c4.DeploymentId);
+            Assert.False(string.IsNullOrWhiteSpace(targetHost.ActivePhysicalPath));
+            Assert.True(Directory.Exists(targetHost.ActivePhysicalPath));
 
             var history = await store.GetDeploymentHistoryAsync(app.Id);
             Assert.Single(history);
@@ -966,6 +966,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
             using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
             var liveRoot = await probeHttp.GetFromJsonAsync<JsonElement>("/");
             Assert.Equal("2.1.0-after-304", liveRoot.GetProperty("version").GetString());
+            Assert.Equal(CommitV1, liveRoot.GetProperty("commitSha").GetString());
 
             // Poll 5 (HTTP 304): Already deployed -> MUST NOT call DownloadVerifiedWorkflowArtifactAsync again!
             await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
@@ -990,27 +991,24 @@ public sealed class AutonomousDeploymentAndRollbackTests
         Directory.CreateDirectory(appsRoot);
         Directory.CreateDirectory(artifactsDir);
 
-        await using var targetHost = new LoopbackSampleIisHost();
-        await targetHost.StartAsync();
+        await using var targetHost = await LiveLoopbackTargetHost.StartAsync();
 
         try
         {
-            var (v1Zip, v1Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v1.zip", "2.2.0-resumed", unhealthy: false);
+            var (v1Zip, v1Sha) = await CreateAspNetCoreSampleArtifactAsync(
+                artifactsDir, "v1.zip", "2.2.0-resumed", CommitV1, bakeUnhealthyWebConfig: false);
 
             var dbPath = Path.Combine(dataRoot, "agent-state.db");
             var dbOpts = new DbContextOptionsBuilder<ServerForgeDbContext>().UseSqlite($"Data Source={dbPath}").Options;
-            await using (var initDb = new ServerForgeDbContext(dbOpts))
+            IDbContextFactory<ServerForgeDbContext> factory = new TestDbContextFactory(dbOpts);
+            await using (var initDb = await factory.CreateDbContextAsync())
                 await initDb.InitializeSqliteAsync();
 
-            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
-            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
-                .ReturnsAsync(() => new ServerForgeDbContext(dbOpts));
-
             var protector = new DpapiSecretProtector(DataProtectionScope.CurrentUser);
-            var store = new ServerForgeStore(factoryMock.Object, protector);
+            var store = new ServerForgeStore(factory, protector);
             var agentOpts = new AgentOptions { DataRoot = dataRoot, AppsRoot = appsRoot };
             var identityStore = new AgentIdentityStore(agentOpts);
-            identityStore.UpdateState(s => s.ProtectedGitHubPat = protector.Protect("github_pat_restart_pending", "agent:github-pat"));
+            identityStore.StoreProtectedGitHubPat(protector.Protect("github_pat_restart_pending", "agent:github-pat"));
 
             var proj = await store.EnsureDefaultProjectAsync("test");
             var app = new ManagedApplication
@@ -1020,6 +1018,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 Name = "Restart Pending App",
                 Slug = "restart-pending-app",
                 RuntimeType = ApplicationRuntimeType.AspNetCore,
+                ManagementState = ResourceManagementState.ServerForgeCreated,
                 RepositoryFullName = "owner/restart-pending",
                 Branch = "main",
                 AutoDeployEnabled = true,
@@ -1066,7 +1065,8 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 store, ghMock.Object, orchestrator, protector, identityStore, Options.Create(agentOpts), NullLogger<GitHubAutoDeployWorker>.Instance);
             await workerBeforeRestart.PollAuthorizedApplicationsAsync(CancellationToken.None);
 
-            // Simulate startup recovery on Agent restart: pending WorkflowRunning candidate MUST be preserved!
+            // Simulate startup recovery on Agent restart: pending WorkflowRunning candidate MUST be preserved
+            // and DPAPI-protected GitHub PAT MUST survive reloading AgentIdentityStore from disk!
             var recoveredCount = await store.RecoverInterruptedAutonomousCandidatesAsync();
             Assert.Equal(0, recoveredCount);
             var persisted = await store.GetAutonomousCandidateAsync(app.Id);
@@ -1074,19 +1074,28 @@ public sealed class AutonomousDeploymentAndRollbackTests
             Assert.Equal(AutonomousCandidateState.WorkflowRunning, persisted!.State);
             Assert.Equal("\"etag-persist-1\"", persisted.LastBranchHeadETag);
 
+            var identityStoreAfterRestart = new AgentIdentityStore(agentOpts);
+            Assert.False(string.IsNullOrWhiteSpace(identityStoreAfterRestart.State.ProtectedGitHubPat));
+            Assert.Equal(
+                "github_pat_restart_pending",
+                protector.Unprotect(identityStoreAfterRestart.State.ProtectedGitHubPat!, "agent:github-pat"));
+
             // Worker 2 boots after Agent restart with empty in-memory cache; GitHub returns HTTP 304, artifact is now ready!
             artifactReady = true;
             var workerAfterRestart = new GitHubAutoDeployWorker(
-                store, ghMock.Object, orchestrator, protector, identityStore, Options.Create(agentOpts), NullLogger<GitHubAutoDeployWorker>.Instance);
+                store, ghMock.Object, orchestrator, protector, identityStoreAfterRestart, Options.Create(agentOpts), NullLogger<GitHubAutoDeployWorker>.Instance);
             await workerAfterRestart.PollAuthorizedApplicationsAsync(CancellationToken.None);
 
             Assert.Equal("\"etag-persist-1\"", observedETagAfterRestart);
             var finalCandidate = await store.GetAutonomousCandidateAsync(app.Id);
             Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, finalCandidate!.State);
+            Assert.False(string.IsNullOrWhiteSpace(targetHost.ActivePhysicalPath));
+            Assert.True(Directory.Exists(targetHost.ActivePhysicalPath));
 
             using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
             var liveRoot = await probeHttp.GetFromJsonAsync<JsonElement>("/");
             Assert.Equal("2.2.0-resumed", liveRoot.GetProperty("version").GetString());
+            Assert.Equal(CommitV1, liveRoot.GetProperty("commitSha").GetString());
         }
         finally
         {
@@ -1106,28 +1115,26 @@ public sealed class AutonomousDeploymentAndRollbackTests
         Directory.CreateDirectory(appsRoot);
         Directory.CreateDirectory(artifactsDir);
 
-        await using var targetHost = new LoopbackSampleIisHost();
-        await targetHost.StartAsync();
+        await using var targetHost = await LiveLoopbackTargetHost.StartAsync();
 
         try
         {
-            var (v2Zip, v2Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v2.zip", "2.3.0-superseding", unhealthy: false);
-            var (v4Zip, v4Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v4.zip", "2.4.0-post-ratelimit", unhealthy: false);
+            var (v2Zip, v2Sha) = await CreateAspNetCoreSampleArtifactAsync(
+                artifactsDir, "v2.zip", "2.3.0-superseding", CommitV2, bakeUnhealthyWebConfig: false);
+            var (v4Zip, v4Sha) = await CreateAspNetCoreSampleArtifactAsync(
+                artifactsDir, "v4.zip", "2.4.0-post-ratelimit", CommitV4Recovery, bakeUnhealthyWebConfig: false);
 
             var dbPath = Path.Combine(dataRoot, "agent-state.db");
             var dbOpts = new DbContextOptionsBuilder<ServerForgeDbContext>().UseSqlite($"Data Source={dbPath}").Options;
-            await using (var initDb = new ServerForgeDbContext(dbOpts))
+            IDbContextFactory<ServerForgeDbContext> factory = new TestDbContextFactory(dbOpts);
+            await using (var initDb = await factory.CreateDbContextAsync())
                 await initDb.InitializeSqliteAsync();
 
-            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
-            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
-                .ReturnsAsync(() => new ServerForgeDbContext(dbOpts));
-
             var protector = new DpapiSecretProtector(DataProtectionScope.CurrentUser);
-            var store = new ServerForgeStore(factoryMock.Object, protector);
+            var store = new ServerForgeStore(factory, protector);
             var agentOpts = new AgentOptions { DataRoot = dataRoot, AppsRoot = appsRoot };
             var identityStore = new AgentIdentityStore(agentOpts);
-            identityStore.UpdateState(s => s.ProtectedGitHubPat = protector.Protect("github_pat_supersede_test", "agent:github-pat"));
+            identityStore.StoreProtectedGitHubPat(protector.Protect("github_pat_supersede_test", "agent:github-pat"));
 
             var proj = await store.EnsureDefaultProjectAsync("test");
             var app = new ManagedApplication
@@ -1137,6 +1144,7 @@ public sealed class AutonomousDeploymentAndRollbackTests
                 Name = "Supersede & RateLimit App",
                 Slug = "supersede-app",
                 RuntimeType = ApplicationRuntimeType.AspNetCore,
+                ManagementState = ResourceManagementState.ServerForgeCreated,
                 RepositoryFullName = "owner/supersede-app",
                 Branch = "main",
                 AutoDeployEnabled = true,
@@ -1212,6 +1220,8 @@ public sealed class AutonomousDeploymentAndRollbackTests
             var afterV2 = await store.GetAutonomousCandidateAsync(app.Id);
             Assert.Equal(CommitV2, afterV2!.CommitSha);
             Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, afterV2.State);
+            var v2Path = targetHost.ActivePhysicalPath;
+            Assert.False(string.IsNullOrWhiteSpace(v2Path));
 
             // 3. Poll 3 & 4: CommitV3Broken fails in CI -> marked terminal WorkflowFailedOrCancelled -> HTTP 304 does NOT re-poll artifact
             currentHead = new GitHubHeadCheckResult(true, CommitV3Broken, "v3 failed ci", "dev", "\"e3\"", 4898);
@@ -1241,10 +1251,13 @@ public sealed class AutonomousDeploymentAndRollbackTests
             var afterV4 = await store.GetAutonomousCandidateAsync(app.Id);
             Assert.Equal(CommitV4Recovery, afterV4!.CommitSha);
             Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, afterV4.State);
+            Assert.False(string.IsNullOrWhiteSpace(targetHost.ActivePhysicalPath));
+            Assert.NotEqual(v2Path, targetHost.ActivePhysicalPath);
 
             using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
             var liveRoot = await probeHttp.GetFromJsonAsync<JsonElement>("/");
             Assert.Equal("2.4.0-post-ratelimit", liveRoot.GetProperty("version").GetString());
+            Assert.Equal(CommitV4Recovery, liveRoot.GetProperty("commitSha").GetString());
         }
         finally
         {

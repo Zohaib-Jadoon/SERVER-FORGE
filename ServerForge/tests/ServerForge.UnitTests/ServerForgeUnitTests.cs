@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Net;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -1468,7 +1469,20 @@ public sealed class DeploymentAndPersistenceTests
             var missingPathNoIdClient = new GitHubApiClient(
                 new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent($$"""{"workflow_runs":[{"id":910,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main"}]}""")
+                    Content = new StringContent(JsonSerializer.Serialize(new
+                    {
+                        workflow_runs = new[]
+                        {
+                            new
+                            {
+                                id = 910L,
+                                status = "completed",
+                                conclusion = "success",
+                                head_sha = Commit1,
+                                head_branch = "main"
+                            }
+                        }
+                    }))
                 })),
                 NullLogger<GitHubApiClient>.Instance);
             var missingNoIdRes = await missingPathNoIdClient.DownloadVerifiedWorkflowArtifactAsync(
@@ -1488,20 +1502,54 @@ public sealed class DeploymentAndPersistenceTests
                     if (uri.Contains("/actions/runs?"))
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
-                            Content = new StringContent($$"""{"workflow_runs":[{"id":911,"workflow_id":555,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","repository":{"full_name":"owner/repo"}}]}""")
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                workflow_runs = new[]
+                                {
+                                    new
+                                    {
+                                        id = 911L,
+                                        workflow_id = 555L,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        head_sha = Commit1,
+                                        head_branch = "main",
+                                        repository = new { full_name = "owner/repo" }
+                                    }
+                                }
+                            }))
                         };
                     if (uri.Contains("/actions/workflows/555"))
                     {
                         resolvedWorkflowEndpointCalled = true;
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
-                            Content = new StringContent("""{"id":555,"path":".github/workflows/serverforge-deploy.yml"}""")
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                id = 555L,
+                                path = ".github/workflows/serverforge-deploy.yml"
+                            }))
                         };
                     }
                     if (uri.Contains("/artifacts"))
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
-                            Content = new StringContent($$"""{"artifacts":[{"id":556,"name":"serverforge-release","expired":false,"size_in_bytes":{{validZipBytes.Length}},"digest":"sha256:{{validSha}}","workflow_run":{"id":911},"archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/556/zip"}]}""")
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                artifacts = new[]
+                                {
+                                    new
+                                    {
+                                        id = 556L,
+                                        name = "serverforge-release",
+                                        expired = false,
+                                        size_in_bytes = validZipBytes.Length,
+                                        digest = $"sha256:{validSha}",
+                                        workflow_run = new { id = 911L },
+                                        archive_download_url = "https://api.github.com/repos/owner/repo/actions/artifacts/556/zip"
+                                    }
+                                }
+                            }))
                         };
                     return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(validZipBytes) };
                 })),
@@ -1541,10 +1589,50 @@ public sealed class DeploymentAndPersistenceTests
                 {
                     var uri = req.RequestUri!.AbsoluteUri;
                     if (uri.Contains("/actions/runs?"))
-                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":920,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                workflow_runs = new[]
+                                {
+                                    new
+                                    {
+                                        id = 920L,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        head_sha = Commit1,
+                                        head_branch = "main",
+                                        path = ".github/workflows/serverforge-deploy.yml"
+                                    }
+                                }
+                            }))
+                        };
                     return new HttpResponseMessage(HttpStatusCode.OK)
                     {
-                        Content = new StringContent($$"""{"artifacts":[{"id":1,"name":"coverage-report","expired":false,"size_in_bytes":100,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/dl/1"},{"id":2,"name":"debug-logs","expired":false,"size_in_bytes":100,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/dl/2"}]}""")
+                        Content = new StringContent(JsonSerializer.Serialize(new
+                        {
+                            artifacts = new[]
+                            {
+                                new
+                                {
+                                    id = 1L,
+                                    name = "coverage-report",
+                                    expired = false,
+                                    size_in_bytes = 100,
+                                    digest = $"sha256:{validSha}",
+                                    archive_download_url = "https://api.github.com/dl/1"
+                                },
+                                new
+                                {
+                                    id = 2L,
+                                    name = "debug-logs",
+                                    expired = false,
+                                    size_in_bytes = 100,
+                                    digest = $"sha256:{validSha}",
+                                    archive_download_url = "https://api.github.com/dl/2"
+                                }
+                            }
+                        }))
                     };
                 })),
                 NullLogger<GitHubApiClient>.Instance);
@@ -1561,11 +1649,51 @@ public sealed class DeploymentAndPersistenceTests
                 {
                     var uri = req.RequestUri!.AbsoluteUri;
                     if (uri.Contains("/actions/runs?"))
-                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":921,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                workflow_runs = new[]
+                                {
+                                    new
+                                    {
+                                        id = 921L,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        head_sha = Commit1,
+                                        head_branch = "main",
+                                        path = ".github/workflows/serverforge-deploy.yml"
+                                    }
+                                }
+                            }))
+                        };
                     if (uri.Contains("/artifacts") && !uri.EndsWith("/zip"))
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
-                            Content = new StringContent($$"""{"artifacts":[{"id":20,"name":"coverage","expired":false,"size_in_bytes":50,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/20/zip"},{"id":21,"name":"serverforge-sample-app-win-x64","expired":false,"size_in_bytes":{{validZipBytes.Length}},"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/21/zip"}]}""")
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                artifacts = new[]
+                                {
+                                    new
+                                    {
+                                        id = 20L,
+                                        name = "coverage",
+                                        expired = false,
+                                        size_in_bytes = 50,
+                                        digest = $"sha256:{validSha}",
+                                        archive_download_url = "https://api.github.com/repos/owner/repo/actions/artifacts/20/zip"
+                                    },
+                                    new
+                                    {
+                                        id = 21L,
+                                        name = "serverforge-sample-app-win-x64",
+                                        expired = false,
+                                        size_in_bytes = validZipBytes.Length,
+                                        digest = $"sha256:{validSha}",
+                                        archive_download_url = "https://api.github.com/repos/owner/repo/actions/artifacts/21/zip"
+                                    }
+                                }
+                            }))
                         };
                     if (uri.StartsWith("https://api.github.com/repos/owner/repo/actions/artifacts/21/zip"))
                     {
@@ -1590,11 +1718,42 @@ public sealed class DeploymentAndPersistenceTests
                 {
                     var uri = req.RequestUri!.AbsoluteUri;
                     if (uri.Contains("/actions/runs?"))
-                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":922,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                workflow_runs = new[]
+                                {
+                                    new
+                                    {
+                                        id = 922L,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        head_sha = Commit1,
+                                        head_branch = "main",
+                                        path = ".github/workflows/serverforge-deploy.yml"
+                                    }
+                                }
+                            }))
+                        };
                     if (uri.Contains("/artifacts") && !uri.EndsWith("/zip"))
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
-                            Content = new StringContent($$"""{"artifacts":[{"id":22,"name":"serverforge-release","expired":false,"size_in_bytes":{{validZipBytes.Length}},"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/22/zip"}]}""")
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                artifacts = new[]
+                                {
+                                    new
+                                    {
+                                        id = 22L,
+                                        name = "serverforge-release",
+                                        expired = false,
+                                        size_in_bytes = validZipBytes.Length,
+                                        digest = $"sha256:{validSha}",
+                                        archive_download_url = "https://api.github.com/repos/owner/repo/actions/artifacts/22/zip"
+                                    }
+                                }
+                            }))
                         };
                     var r = new HttpResponseMessage(HttpStatusCode.Found);
                     r.Headers.Location = new Uri("https://evil.example.com/malicious.zip");
@@ -1613,10 +1772,41 @@ public sealed class DeploymentAndPersistenceTests
                 {
                     var uri = req.RequestUri!.AbsoluteUri;
                     if (uri.Contains("/actions/runs?"))
-                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":923,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                workflow_runs = new[]
+                                {
+                                    new
+                                    {
+                                        id = 923L,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        head_sha = Commit1,
+                                        head_branch = "main",
+                                        path = ".github/workflows/serverforge-deploy.yml"
+                                    }
+                                }
+                            }))
+                        };
                     return new HttpResponseMessage(HttpStatusCode.OK)
                     {
-                        Content = new StringContent($$"""{"artifacts":[{"id":23,"name":"serverforge-release","expired":false,"size_in_bytes":999999,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/23/zip"}]}""")
+                        Content = new StringContent(JsonSerializer.Serialize(new
+                        {
+                            artifacts = new[]
+                            {
+                                new
+                                {
+                                    id = 23L,
+                                    name = "serverforge-release",
+                                    expired = false,
+                                    size_in_bytes = 999999,
+                                    digest = $"sha256:{validSha}",
+                                    archive_download_url = "https://api.github.com/repos/owner/repo/actions/artifacts/23/zip"
+                                }
+                            }
+                        }))
                     };
                 })),
                 NullLogger<GitHubApiClient>.Instance)
@@ -1639,11 +1829,42 @@ public sealed class DeploymentAndPersistenceTests
                 {
                     var uri = req.RequestUri!.AbsoluteUri;
                     if (uri.Contains("/actions/runs?"))
-                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":924,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                workflow_runs = new[]
+                                {
+                                    new
+                                    {
+                                        id = 924L,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        head_sha = Commit1,
+                                        head_branch = "main",
+                                        path = ".github/workflows/serverforge-deploy.yml"
+                                    }
+                                }
+                            }))
+                        };
                     if (uri.Contains("/artifacts") && !uri.EndsWith("/zip"))
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
-                            Content = new StringContent($$"""{"artifacts":[{"id":24,"name":"serverforge-release","expired":false,"size_in_bytes":{{nonZipBytes.Length}},"digest":"sha256:{{nonZipSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/24/zip"}]}""")
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                artifacts = new[]
+                                {
+                                    new
+                                    {
+                                        id = 24L,
+                                        name = "serverforge-release",
+                                        expired = false,
+                                        size_in_bytes = nonZipBytes.Length,
+                                        digest = $"sha256:{nonZipSha}",
+                                        archive_download_url = "https://api.github.com/repos/owner/repo/actions/artifacts/24/zip"
+                                    }
+                                }
+                            }))
                         };
                     return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(nonZipBytes) };
                 })),
@@ -1672,7 +1893,21 @@ public sealed class DeploymentAndPersistenceTests
             var runningClient = new GitHubApiClient(
                 new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent($$"""{"workflow_runs":[{"id":930,"status":"in_progress","conclusion":null,"head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""")
+                    Content = new StringContent(JsonSerializer.Serialize(new
+                    {
+                        workflow_runs = new[]
+                        {
+                            new
+                            {
+                                id = 930L,
+                                status = "in_progress",
+                                conclusion = (string?)null,
+                                head_sha = Commit1,
+                                head_branch = "main",
+                                path = ".github/workflows/serverforge-deploy.yml"
+                            }
+                        }
+                    }))
                 })),
                 NullLogger<GitHubApiClient>.Instance);
             var runningRes = await runningClient.DownloadVerifiedWorkflowArtifactAsync(
@@ -1685,8 +1920,28 @@ public sealed class DeploymentAndPersistenceTests
                 new HttpClient(new StubHttpHandler(req =>
                 {
                     if (req.RequestUri!.AbsoluteUri.Contains("/actions/runs?"))
-                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":931,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"artifacts":[]}""") };
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(JsonSerializer.Serialize(new
+                            {
+                                workflow_runs = new[]
+                                {
+                                    new
+                                    {
+                                        id = 931L,
+                                        status = "completed",
+                                        conclusion = "success",
+                                        head_sha = Commit1,
+                                        head_branch = "main",
+                                        path = ".github/workflows/serverforge-deploy.yml"
+                                    }
+                                }
+                            }))
+                        };
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent(JsonSerializer.Serialize(new { artifacts = Array.Empty<object>() }))
+                    };
                 })),
                 NullLogger<GitHubApiClient>.Instance);
             var pendingRes = await pendingArtClient.DownloadVerifiedWorkflowArtifactAsync(
@@ -1698,7 +1953,21 @@ public sealed class DeploymentAndPersistenceTests
             var failedClient = new GitHubApiClient(
                 new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent($$"""{"workflow_runs":[{"id":932,"status":"completed","conclusion":"cancelled","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""")
+                    Content = new StringContent(JsonSerializer.Serialize(new
+                    {
+                        workflow_runs = new[]
+                        {
+                            new
+                            {
+                                id = 932L,
+                                status = "completed",
+                                conclusion = "cancelled",
+                                head_sha = Commit1,
+                                head_branch = "main",
+                                path = ".github/workflows/serverforge-deploy.yml"
+                            }
+                        }
+                    }))
                 })),
                 NullLogger<GitHubApiClient>.Instance);
             var failedRes = await failedClient.DownloadVerifiedWorkflowArtifactAsync(
