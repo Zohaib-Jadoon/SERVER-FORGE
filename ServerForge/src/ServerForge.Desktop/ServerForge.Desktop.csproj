@@ -11,6 +11,12 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Prevent ImplicitUsings from globally importing WinForms/GDI+ types that collide with WPF (e.g. UserControl, Application).
+         UseWindowsForms remains enabled for explicit System.Windows.Forms.NotifyIcon system tray support. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Http" />

@@ -337,6 +337,7 @@ public sealed class DeploymentAndPersistenceTests
         }
         finally
         {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             if (File.Exists(dbFile)) File.Delete(dbFile);
         }
     }
