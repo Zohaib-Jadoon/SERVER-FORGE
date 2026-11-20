@@ -62,7 +62,7 @@ begin
   Result := FileExists(ExpandConstant('{commonappdata}\ServerForge\Agent\pairing-code.txt'));
 end;
 
-function RunHiddenSc(const Params: string; out ResultCode: Integer): Boolean;
+function RunHiddenSc(const Params: string; var ResultCode: Integer): Boolean;
 begin
   Result := Exec(ExpandConstant('{sys}\sc.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
@@ -137,7 +137,7 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
-    BinPath := '"' + ExpandConstant('{app}\{#MyAppExeName}') + '"';
+    BinPath := ExpandConstant('{app}\{#MyAppExeName}');
     if ServiceExists() then
     begin
       { Safe in-place upgrade: update binary path without destroying service registration }

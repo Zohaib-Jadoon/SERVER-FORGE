@@ -11,3 +11,5 @@
   5. Removing an application from ServerForge management MUST NEVER delete hosted files, IIS sites, or databases.
   6. Never auto-revert destructive database schema migrations during application rollback.
   7. Never fabricate build, test, or installer results when running on a Linux host without `.NET 10` Windows SDK or `ISCC.exe`.
+  8. Preserve SQLite foreign-key enforcement (`ProjectGroup -> ManagedApplication`). `ManagedApplication.ProjectGroupId` MUST be a non-empty `Guid` referencing a persisted `ProjectGroup`; never disable FKs or silently fabricate random duplicate projects. Use explicit idempotent `ServerForgeStore.EnsureDefaultProjectAsync` (slug `"default"`) when an explicit project group has not been created yet.
+  9. Inno Setup 6 Pascal Script does NOT support `out` parameters — always declare output parameters with `var` and avoid double-quoting `sc.exe` `binPath=` strings.

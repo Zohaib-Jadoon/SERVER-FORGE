@@ -86,6 +86,7 @@ public sealed class SecurityAndValidationTests
     {
         var app = new ManagedApplication
         {
+            ProjectGroupId = Guid.NewGuid(),
             Name = "Legacy Portal",
             Slug = "legacy-portal",
             RuntimeType = ApplicationRuntimeType.ClassicAsp,
@@ -101,6 +102,28 @@ public sealed class SecurityAndValidationTests
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.Contains("explicit repository authorization", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, e => e.Contains("Classic ASP", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ApplicationConfigValidator_RejectsEmptyProjectGroupId()
+    {
+        var app = new ManagedApplication
+        {
+            ProjectGroupId = Guid.Empty,
+            Name = "Orders API",
+            Slug = "orders-api",
+            RuntimeType = ApplicationRuntimeType.NestJsApi,
+            RepositoryFullName = "owner/orders-api",
+            Branch = "main",
+            WorkingDirectory = ".",
+            InternalPort = 4010,
+            RepositoryExplicitlyAuthorized = true,
+            AutoDeployEnabled = true
+        };
+
+        var result = ApplicationConfigValidator.Validate(app);
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Contains("ProjectGroupId", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -273,7 +296,14 @@ public sealed class DeploymentAndPersistenceTests
     [Fact]
     public async Task SqliteStore_PersistsPairedServer_RecoversInterruptedDeploys_AndRemovesManagementOnly()
     {
-        var dbFile = Path.Combine(Path.GetTempPath(), $"sf-sqlite-{Guid.NewGuid():N}.db");
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-sqlite-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var dbFile = Path.Combine(tempRoot, "serverforge.db");
+        var hostedReleaseDir = Path.Combine(tempRoot, "hosted-apps", "orders-api", "releases", "r1");
+        Directory.CreateDirectory(hostedReleaseDir);
+        var hostedMarkerFile = Path.Combine(hostedReleaseDir, "index.js");
+        await File.WriteAllTextAsync(hostedMarkerFile, "// simulated hosted release file");
+
         try
         {
             var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
@@ -288,6 +318,16 @@ public sealed class DeploymentAndPersistenceTests
                 .ReturnsAsync(() => new ServerForgeDbContext(opts));
 
             var store = new ServerForgeStore(factoryMock.Object, new DpapiSecretProtector());
+
+            // Verify SQLite foreign-key integrity remains enabled on connections
+            await using (var fkCheckDb = new ServerForgeDbContext(opts))
+            {
+                await fkCheckDb.Database.OpenConnectionAsync();
+                await using var cmd = fkCheckDb.Database.GetDbConnection().CreateCommand();
+                cmd.CommandText = "PRAGMA foreign_keys;";
+                var fkEnabled = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+                Assert.Equal(1L, fkEnabled);
+            }
 
             // Problem E: Pairing persistence across restarts
             await store.UpsertServerAsync(new ManagedServer
@@ -304,23 +344,44 @@ public sealed class DeploymentAndPersistenceTests
             Assert.Single(servers);
             Assert.Equal("agent-prod-01", servers[0].AgentId);
 
+            // Create and persist a valid ProjectGroup before registering applications
+            var project = new ProjectGroup
+            {
+                Name = "Commerce Platform",
+                Slug = "commerce-platform",
+                Description = "Relational fixture project group"
+            };
+            await store.UpsertProjectAsync(project, "unit-test");
+
             // Problem G: Interrupted deployment crash recovery
             var app = new ManagedApplication
             {
+                ProjectGroupId = project.Id,
                 Name = "Orders API",
                 Slug = "orders-api",
                 RuntimeType = ApplicationRuntimeType.NestJsApi,
                 RepositoryFullName = "owner/orders-api",
                 RepositoryExplicitlyAuthorized = true,
-                InternalPort = 4010
+                InternalPort = 4010,
+                ReleasesRootPath = Path.Combine(tempRoot, "hosted-apps", "orders-api"),
+                ActiveReleasePath = hostedReleaseDir
             };
             await store.UpsertApplicationAsync(app, "unit-test");
+
+            // Updating an existing application preserves identity and persists changes
+            app.Branch = "release";
+            app.InternalPort = 4011;
+            await store.UpsertApplicationAsync(app, "unit-test");
+            var reloadedApp = await store.GetApplicationByIdAsync(app.Id);
+            Assert.NotNull(reloadedApp);
+            Assert.Equal("release", reloadedApp!.Branch);
+            Assert.Equal(4011, reloadedApp.InternalPort);
 
             await store.RecordDeploymentAsync(new DeploymentRecord
             {
                 ApplicationId = app.Id,
                 CommitSha = Commit1,
-                Branch = "main",
+                Branch = "release",
                 State = DeploymentState.Deploying
             });
 
@@ -328,17 +389,103 @@ public sealed class DeploymentAndPersistenceTests
             Assert.Equal(1, recoveredCount);
 
             var history = await store.GetDeploymentHistoryAsync(app.Id);
+            Assert.Single(history);
             Assert.Equal(DeploymentState.Failed, history[0].State);
             Assert.Contains("interrupted", history[0].ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
 
-            // Problem D: Remove from management preserves files & records audit
+            // Problem D: Remove from management preserves hosted files on disk & records audit
             Assert.True(await store.RemoveApplicationFromManagementAsync(app.Id, "unit-test"));
             Assert.Empty(await store.GetApplicationsAsync());
+            Assert.True(File.Exists(hostedMarkerFile), "Removing an app from management must NEVER delete hosted files.");
         }
         finally
         {
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-            if (File.Exists(dbFile)) File.Delete(dbFile);
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SqliteStore_EnforcesProjectGroupForeignKeys_AndRejectsInvalidDefaultGuids()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-fk-regression-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var dbFile = Path.Combine(tempRoot, "fk-test.db");
+
+        try
+        {
+            var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
+                .UseSqlite($"Data Source={dbFile}")
+                .Options;
+
+            await using (var init = new ServerForgeDbContext(opts))
+                await init.InitializeSqliteAsync();
+
+            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => new ServerForgeDbContext(opts));
+
+            var store = new ServerForgeStore(factoryMock.Object, new DpapiSecretProtector());
+
+            // 1. Guid.Empty ProjectGroupId must be rejected cleanly
+            var emptyProjectApp = new ManagedApplication
+            {
+                ProjectGroupId = Guid.Empty,
+                Name = "Orphan App",
+                Slug = "orphan-app",
+                RuntimeType = ApplicationRuntimeType.StaticHtml,
+                RepositoryFullName = "owner/orphan"
+            };
+            await Assert.ThrowsAsync<ArgumentException>(() => store.UpsertApplicationAsync(emptyProjectApp, "unit-test"));
+
+            // 2. Nonexistent ProjectGroupId must be rejected without silently creating duplicate projects
+            var missingProjectApp = new ManagedApplication
+            {
+                ProjectGroupId = Guid.NewGuid(),
+                Name = "Unlinked App",
+                Slug = "unlinked-app",
+                RuntimeType = ApplicationRuntimeType.StaticHtml,
+                RepositoryFullName = "owner/unlinked"
+            };
+            await Assert.ThrowsAsync<InvalidOperationException>(() => store.UpsertApplicationAsync(missingProjectApp, "unit-test"));
+            Assert.Empty(await store.GetProjectsAsync());
+
+            // 3. EnsureDefaultProjectAsync creates exactly one default project idempotently
+            var def1 = await store.EnsureDefaultProjectAsync("unit-test");
+            var def2 = await store.EnsureDefaultProjectAsync("unit-test");
+            Assert.Equal(def1.Id, def2.Id);
+            Assert.Single(await store.GetProjectsAsync());
+
+            // 4. Valid app under default project saves cleanly
+            missingProjectApp.ProjectGroupId = def1.Id;
+            await store.UpsertApplicationAsync(missingProjectApp, "unit-test");
+            Assert.Single(await store.GetApplicationsAsync());
+
+            // 5. Direct EF Core insert with nonexistent ProjectGroupId still fails SQLite FK enforcement
+            await using (var rawDb = new ServerForgeDbContext(opts))
+            {
+                rawDb.Applications.Add(new ManagedApplication
+                {
+                    ProjectGroupId = Guid.NewGuid(),
+                    Name = "Direct FK Violation",
+                    Slug = "direct-fk-violation",
+                    RuntimeType = ApplicationRuntimeType.StaticHtml
+                });
+                await Assert.ThrowsAsync<DbUpdateException>(() => rawDb.SaveChangesAsync());
+            }
+
+            // 6. Other persistence methods reject Guid.Empty foreign keys cleanly
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                store.SaveEnvironmentVariableAsync(Guid.Empty, EnvironmentTier.Production, "KEY", "VAL", false, false, "unit-test"));
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                store.UpsertDomainAsync(new DomainBindingRecord { ApplicationId = Guid.Empty, Hostname = "app.local" }, "unit-test"));
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                store.RecordDeploymentAsync(new DeploymentRecord { ApplicationId = Guid.Empty, CommitSha = Commit1, Branch = "main" }));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
         }
     }
 
@@ -366,6 +513,7 @@ public sealed class DeploymentAndPersistenceTests
 
     private static ManagedApplication CreateStaticApp(string tempRoot) => new()
     {
+        ProjectGroupId = Guid.NewGuid(),
         Name = "Marketing Static",
         Slug = "marketing-static",
         RuntimeType = ApplicationRuntimeType.StaticHtml,

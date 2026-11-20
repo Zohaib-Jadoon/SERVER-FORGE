@@ -165,12 +165,31 @@ public sealed class AgentTransportService
         resp.EnsureSuccessStatusCode();
     }
 
+    public async Task SyncProjectAsync(ManagedServer server, ProjectGroup project, CancellationToken ct)
+    {
+        using var http = CreatePinnedClient(server);
+        using var resp = await http.PostAsJsonAsync("api/v1/projects", project, ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+    }
+
     public async Task<ManagedApplication?> RegisterOrUpdateApplicationAsync(ManagedServer server, UpsertApplicationRequest req, CancellationToken ct)
     {
         using var http = CreatePinnedClient(server);
-        HttpResponseMessage resp = req.Id.HasValue
-            ? await http.PutAsJsonAsync($"api/v1/applications/{req.Id.Value}", req, ct).ConfigureAwait(false)
-            : await http.PostAsJsonAsync("api/v1/applications", req, ct).ConfigureAwait(false);
+        HttpResponseMessage resp;
+        if (req.Id.HasValue)
+        {
+            resp = await http.PutAsJsonAsync($"api/v1/applications/{req.Id.Value}", req, ct).ConfigureAwait(false);
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                resp.Dispose();
+                resp = await http.PostAsJsonAsync("api/v1/applications", req, ct).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            resp = await http.PostAsJsonAsync("api/v1/applications", req, ct).ConfigureAwait(false);
+        }
+
         using (resp)
         {
             resp.EnsureSuccessStatusCode();

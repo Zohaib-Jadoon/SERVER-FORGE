@@ -265,6 +265,11 @@ public sealed partial class MainViewModel : ObservableObject
         var slug = NewProjectName.Trim().ToLowerInvariant().Replace(' ', '-');
         var proj = new ProjectGroup { Name = NewProjectName.Trim(), Slug = slug, Description = NewProjectDescription.Trim() };
         await _store.UpsertProjectAsync(proj, Environment.UserName);
+        if (SelectedServer is not null && !IsDemoMode)
+        {
+            try { await _agentTransport.SyncProjectAsync(SelectedServer, proj, CancellationToken.None); }
+            catch { /* Persisted locally; synced when Agent reconnects */ }
+        }
         Projects.Add(proj);
         NewProjectName = string.Empty;
         NewProjectDescription = string.Empty;
@@ -279,12 +284,18 @@ public sealed partial class MainViewModel : ObservableObject
             ? NewAppName.Trim().ToLowerInvariant().Replace(' ', '-')
             : NewAppSlug.Trim().ToLowerInvariant();
 
-        var projectId = Projects.FirstOrDefault()?.Id ?? Guid.NewGuid();
+        var project = Projects.FirstOrDefault();
+        if (project is null)
+        {
+            project = await _store.EnsureDefaultProjectAsync(Environment.UserName);
+            Projects.Add(project);
+        }
+
         var serverId = SelectedServer?.Id ?? Guid.Empty;
 
         var app = new ManagedApplication
         {
-            ProjectGroupId = projectId,
+            ProjectGroupId = project.Id,
             ServerId = serverId,
             Name = NewAppName.Trim(),
             Slug = slug,
@@ -316,6 +327,7 @@ public sealed partial class MainViewModel : ObservableObject
         await _store.UpsertApplicationAsync(app, Environment.UserName);
         if (SelectedServer is not null && !IsDemoMode)
         {
+            await _agentTransport.SyncProjectAsync(SelectedServer, project, CancellationToken.None);
             var req = new UpsertApplicationRequest(
                 app.Id, app.ProjectGroupId, app.Name, app.Slug, app.RuntimeType, app.RepositoryFullName,
                 app.Branch, app.WorkingDirectory, app.AutoDeployEnabled, app.RepositoryExplicitlyAuthorized,
@@ -331,7 +343,7 @@ public sealed partial class MainViewModel : ObservableObject
         NewAppName = string.Empty;
         NewAppSlug = string.Empty;
         OnPropertyChanged(nameof(TotalApplicationCount));
-        StatusMessage = $"Registered application '{app.Name}' ({app.RuntimeType}).";
+        StatusMessage = $"Registered application '{app.Name}' ({app.RuntimeType}) under project '{project.Name}'.";
     }
 
     [RelayCommand]

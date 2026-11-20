@@ -243,7 +243,23 @@ api.MapPost("/github/credentials", async (
     return Results.Ok(new { synced = true });
 });
 
-// ---- Complete Application Registration & Configuration API (Problem D) ----
+// ---- Project Groups & Complete Application Registration API (Problem D) ----
+
+api.MapGet("/projects", async (ServerForgeStore store, CancellationToken ct) =>
+    Results.Ok(await store.GetProjectsAsync(ct)));
+
+api.MapPost("/projects", async (
+    ProjectGroup project,
+    ServerForgeStore store,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(project.Name) || string.IsNullOrWhiteSpace(project.Slug))
+        return Results.BadRequest(new { errors = new[] { "Project name and slug are required." } });
+
+    await store.UpsertProjectAsync(project, user.Identity?.Name ?? "DesktopAdmin", ct);
+    return Results.Created($"/api/v1/projects/{project.Id}", project);
+});
 
 api.MapGet("/applications", async (ServerForgeStore store, CancellationToken ct) =>
     Results.Ok(await store.GetApplicationsAsync(ct)));
@@ -255,11 +271,31 @@ api.MapPost("/applications", async (
     ClaimsPrincipal user,
     CancellationToken ct) =>
 {
+    var actor = user.Identity?.Name ?? "DesktopAdmin";
+    Guid resolvedProjectGroupId;
+    if (req.ProjectGroupId == Guid.Empty)
+    {
+        var defaultProject = await store.EnsureDefaultProjectAsync(actor, ct);
+        resolvedProjectGroupId = defaultProject.Id;
+    }
+    else
+    {
+        var existingProject = await store.GetProjectByIdAsync(req.ProjectGroupId, ct);
+        if (existingProject is null)
+        {
+            return Results.BadRequest(new
+            {
+                errors = new[] { $"ProjectGroup '{req.ProjectGroupId}' does not exist on this agent. Register the ProjectGroup first or omit ProjectGroupId to use the authorized default project." }
+            });
+        }
+        resolvedProjectGroupId = existingProject.Id;
+    }
+
     var appRoot = pathGuard.EnsureWithinRoot(agentOptions.AppsRoot, req.Slug);
     var entity = new ManagedApplication
     {
         Id = req.Id ?? Guid.NewGuid(),
-        ProjectGroupId = req.ProjectGroupId == Guid.Empty ? Guid.NewGuid() : req.ProjectGroupId,
+        ProjectGroupId = resolvedProjectGroupId,
         ServerId = Guid.Empty,
         Name = req.Name.Trim(),
         Slug = req.Slug.Trim().ToLowerInvariant(),
@@ -294,7 +330,7 @@ api.MapPost("/applications", async (
     if (!validation.IsValid)
         return Results.BadRequest(new { errors = validation.Errors });
 
-    await store.UpsertApplicationAsync(entity, user.Identity?.Name ?? "DesktopAdmin", ct);
+    await store.UpsertApplicationAsync(entity, actor, ct);
     return Results.Created($"/api/v1/applications/{entity.Id}", entity);
 });
 
@@ -307,6 +343,19 @@ api.MapPut("/applications/{id:guid}", async (
 {
     var existing = await store.GetApplicationByIdAsync(id, ct);
     if (existing is null) return Results.NotFound();
+
+    if (req.ProjectGroupId != Guid.Empty && req.ProjectGroupId != existing.ProjectGroupId)
+    {
+        var targetProject = await store.GetProjectByIdAsync(req.ProjectGroupId, ct);
+        if (targetProject is null)
+        {
+            return Results.BadRequest(new
+            {
+                errors = new[] { $"ProjectGroup '{req.ProjectGroupId}' does not exist on this agent." }
+            });
+        }
+        existing.ProjectGroupId = targetProject.Id;
+    }
 
     existing.Name = req.Name.Trim();
     existing.RuntimeType = req.RuntimeType;

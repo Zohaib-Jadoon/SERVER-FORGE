@@ -70,6 +70,9 @@ public static partial class ApplicationConfigValidator
     {
         var errors = new List<string>();
 
+        if (app.ProjectGroupId == Guid.Empty)
+            errors.Add("Application must belong to a valid ProjectGroup (ProjectGroupId cannot be empty).");
+
         if (string.IsNullOrWhiteSpace(app.Name))
             errors.Add("Application name is required.");
 

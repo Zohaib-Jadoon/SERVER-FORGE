@@ -32,6 +32,9 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     public async Task SaveLocalAdminAsync(LocalAdminProfile profile, CancellationToken ct = default)
     {
+        if (profile.Id == Guid.Empty)
+            profile.Id = Guid.NewGuid();
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         var existing = await db.AdminProfiles.FindAsync([profile.Id], ct);
         if (existing is null)
@@ -91,6 +94,9 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     public async Task UpsertServerAsync(ManagedServer server, string actor, CancellationToken ct = default)
     {
+        if (server.Id == Guid.Empty)
+            server.Id = Guid.NewGuid();
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         var existing = await db.Servers.FirstOrDefaultAsync(
             s => s.Id == server.Id || (!string.IsNullOrEmpty(server.AgentId) && s.AgentId == server.AgentId), ct);
@@ -137,14 +143,61 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     // ---- Projects ----
 
+    public const string DefaultProjectSlug = "default";
+
     public async Task<IReadOnlyList<ProjectGroup>> GetProjectsAsync(CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);
         return await db.Projects.Include(p => p.Applications).OrderBy(p => p.Name).ToListAsync(ct);
     }
 
+    public async Task<ProjectGroup?> GetProjectByIdAsync(Guid id, CancellationToken ct = default)
+    {
+        if (id == Guid.Empty) return null;
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.Projects.FindAsync([id], ct);
+    }
+
+    /// <summary>
+    /// Explicitly resolves or creates the single authorized default ProjectGroup (slug "default")
+    /// without ever creating duplicate or unrelated project groups.
+    /// </summary>
+    public async Task<ProjectGroup> EnsureDefaultProjectAsync(string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.Projects.FirstOrDefaultAsync(p => p.Slug == DefaultProjectSlug, ct);
+        if (existing is not null)
+            return existing;
+
+        var defaultProject = new ProjectGroup
+        {
+            Id = Guid.NewGuid(),
+            Name = "Default Project",
+            Slug = DefaultProjectSlug,
+            Description = "Authorized default ServerForge project group"
+        };
+
+        db.Projects.Add(defaultProject);
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = "Project.DefaultCreated",
+            TargetResource = $"{defaultProject.Name} ({defaultProject.Slug})",
+            Details = defaultProject.Description
+        });
+        await db.SaveChangesAsync(ct);
+        return defaultProject;
+    }
+
     public async Task UpsertProjectAsync(ProjectGroup project, string actor, CancellationToken ct = default)
     {
+        if (project.Id == Guid.Empty)
+            project.Id = Guid.NewGuid();
+        if (string.IsNullOrWhiteSpace(project.Name))
+            throw new ArgumentException("ProjectGroup.Name is required.", nameof(project));
+        if (string.IsNullOrWhiteSpace(project.Slug))
+            throw new ArgumentException("ProjectGroup.Slug is required.", nameof(project));
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         var existing = await db.Projects.FindAsync([project.Id], ct);
         if (existing is null)
@@ -178,19 +231,23 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     public async Task UpsertApplicationAsync(ManagedApplication app, string actor, CancellationToken ct = default)
     {
+        if (app.Id == Guid.Empty)
+            app.Id = Guid.NewGuid();
+
+        if (app.ProjectGroupId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "ManagedApplication.ProjectGroupId cannot be Guid.Empty. Assign an existing ProjectGroup or call EnsureDefaultProjectAsync first.",
+                nameof(app));
+        }
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         app.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
-        // Ensure referenced ProjectGroup exists when Agent receives app directly
-        if (app.ProjectGroupId != Guid.Empty && !await db.Projects.AnyAsync(p => p.Id == app.ProjectGroupId, ct))
+        if (!await db.Projects.AnyAsync(p => p.Id == app.ProjectGroupId, ct))
         {
-            db.Projects.Add(new ProjectGroup
-            {
-                Id = app.ProjectGroupId,
-                Name = "Default Project",
-                Slug = $"project-{app.ProjectGroupId.ToString("N")[..8]}",
-                Description = "Auto-registered project group"
-            });
+            throw new InvalidOperationException(
+                $"Referenced ProjectGroup '{app.ProjectGroupId}' does not exist. Persist the ProjectGroup before saving ManagedApplication '{app.Slug}'.");
         }
 
         var existing = await db.Applications.FindAsync([app.Id], ct);
@@ -258,6 +315,9 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
         string actor,
         CancellationToken ct = default)
     {
+        if (applicationId == Guid.Empty)
+            throw new ArgumentException("ApplicationId cannot be Guid.Empty when saving an environment variable.", nameof(applicationId));
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         var storedValue = isSecret
             ? _secretProtector.Protect(plaintextValue, $"env:{applicationId}:{tier}:{key}")
@@ -350,6 +410,11 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     public async Task UpsertDomainAsync(DomainBindingRecord domain, string actor, CancellationToken ct = default)
     {
+        if (domain.Id == Guid.Empty)
+            domain.Id = Guid.NewGuid();
+        if (domain.ApplicationId == Guid.Empty)
+            throw new ArgumentException("DomainBindingRecord.ApplicationId cannot be Guid.Empty.", nameof(domain));
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         var existing = await db.DomainBindings.FindAsync([domain.Id], ct);
         if (existing is null) db.DomainBindings.Add(domain);
@@ -375,6 +440,9 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     public async Task UpsertDatabaseServerAsync(DatabaseServerRecord record, string? plaintextConnectionString, string actor, CancellationToken ct = default)
     {
+        if (record.Id == Guid.Empty)
+            record.Id = Guid.NewGuid();
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         if (!string.IsNullOrWhiteSpace(plaintextConnectionString))
             record.ProtectedConnectionString = _secretProtector.Protect(plaintextConnectionString, $"db:{record.Id}");
@@ -401,6 +469,9 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     public async Task UpsertBackupJobAsync(BackupJobRecord job, string actor, CancellationToken ct = default)
     {
+        if (job.Id == Guid.Empty)
+            job.Id = Guid.NewGuid();
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         var existing = await db.BackupJobs.FindAsync([job.Id], ct);
         if (existing is null) db.BackupJobs.Add(job);
@@ -420,6 +491,11 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
 
     public async Task RecordDeploymentAsync(DeploymentRecord record, CancellationToken ct = default)
     {
+        if (record.Id == Guid.Empty)
+            record.Id = Guid.NewGuid();
+        if (record.ApplicationId == Guid.Empty)
+            throw new ArgumentException("DeploymentRecord.ApplicationId cannot be Guid.Empty.", nameof(record));
+
         await using var db = await _factory.CreateDbContextAsync(ct);
         var existing = await db.Deployments.FindAsync([record.Id], ct);
         if (existing is null)

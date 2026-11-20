@@ -19,15 +19,27 @@ $InstallersDir = Join-Path $Root "artifacts\installers"
 $DesktopIss = Join-Path $Root "installers\Desktop\ServerForge-Desktop.iss"
 $AgentIss = Join-Path $Root "installers\Agent\ServerForge-Agent.iss"
 
-if (-not (Test-Path $IsccPath)) {
+$candidateIsccPaths = @(
+    $IsccPath,
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+    "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+    "C:\ProgramData\chocolatey\bin\ISCC.exe"
+)
+
+$resolvedIscc = $candidateIsccPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $resolvedIscc) {
     $fromPath = Get-Command iscc.exe -ErrorAction SilentlyContinue
     if ($fromPath) {
-        $IsccPath = $fromPath.Source
-    } else {
-        Write-Error "Inno Setup 6 (ISCC.exe) not found. Install via: winget install JRSoftware.InnoSetup"
-        exit 1
+        $resolvedIscc = $fromPath.Source
     }
 }
+
+if (-not $resolvedIscc) {
+    Write-Error "Inno Setup 6 (ISCC.exe) not found. Install via: winget install JRSoftware.InnoSetup or choco install innosetup"
+    exit 1
+}
+$IsccPath = $resolvedIscc
+Write-Host "Using Inno Setup compiler: $IsccPath" -ForegroundColor Gray
 
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "build-windows.ps1") -Configuration $Configuration
