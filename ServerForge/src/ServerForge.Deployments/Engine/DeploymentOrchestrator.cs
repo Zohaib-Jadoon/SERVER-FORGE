@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Compression;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using ServerForge.Contracts.Dtos;
 using ServerForge.Contracts.Enums;
@@ -12,33 +13,43 @@ using ServerForge.Security.Execution;
 namespace ServerForge.Deployments.Engine;
 
 /// <summary>
-/// Coordinates reliable, serialized per-application deployments while allowing independent applications
-/// to deploy concurrently. Implements immutable release directories, SHA-256 integrity checks,
-/// readiness verification, and automatic rollback to the last known healthy release.
+/// Durable deployment engine enforcing:
+/// 1. Exact commit SHA, branch, and repository authorization checks.
+/// 2. Trusted artifact provenance & SHA-256 verification (never succeeds on missing/empty/corrupt/untrusted artifacts).
+/// 3. Runtime-specific staged application-file validation before cutover.
+/// 4. Per-application SemaphoreSlim serialization with concurrent independent deployments.
+/// 5. Persisted state transitions for Agent-restart crash recovery & duplicate-commit prevention.
+/// 6. Safe LastKnownGoodReleasePath tracking across first deploy, upgrades, failed updates, and rollbacks.
 /// </summary>
-public sealed class DeploymentOrchestrator : IDeploymentEngine
+public sealed partial class DeploymentOrchestrator : IDeploymentEngine
 {
     private readonly IReadOnlyDictionary<ApplicationRuntimeType, IAppDeploymentAdapter> _adapters;
     private readonly IPathBoundaryGuard _pathGuard;
     private readonly ISecretProtector _secretProtector;
     private readonly HttpClient _healthHttpClient;
     private readonly ILogger<DeploymentOrchestrator> _logger;
+    private readonly IDeploymentStatePersistence? _persistence;
 
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _appLocks = new();
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeCancellations = new();
+
+    [GeneratedRegex(@"^[0-9a-fA-F]{40}$", RegexOptions.Compiled)]
+    private static partial Regex FullGitShaRegex();
 
     public DeploymentOrchestrator(
         IEnumerable<IAppDeploymentAdapter> adapters,
         IPathBoundaryGuard pathGuard,
         ISecretProtector secretProtector,
         HttpClient healthHttpClient,
-        ILogger<DeploymentOrchestrator> logger)
+        ILogger<DeploymentOrchestrator> logger,
+        IDeploymentStatePersistence? persistence = null)
     {
         _adapters = adapters.ToDictionary(a => a.SupportedRuntime);
         _pathGuard = pathGuard;
         _secretProtector = secretProtector;
         _healthHttpClient = healthHttpClient;
         _logger = logger;
+        _persistence = persistence;
     }
 
     public async Task<DeploymentRecord> EnqueueAndExecuteAsync(
@@ -52,6 +63,15 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
         if (!validation.IsValid)
             throw new InvalidOperationException($"Invalid application configuration: {string.Join("; ", validation.Errors)}");
 
+        if (!application.RepositoryExplicitlyAuthorized)
+            throw new UnauthorizedAccessException($"Repository '{application.RepositoryFullName}' is not explicitly authorized for deployment.");
+
+        if (!string.Equals(request.Branch, application.Branch, StringComparison.Ordinal))
+            throw new UnauthorizedAccessException($"Deployment branch mismatch: expected '{application.Branch}', received '{request.Branch}'.");
+
+        if (!FullGitShaRegex().IsMatch(request.CommitSha ?? string.Empty))
+            throw new InvalidOperationException($"Deployment requires an exact 40-character Git commit SHA. Received: '{request.CommitSha}'.");
+
         if (!_adapters.TryGetValue(application.RuntimeType, out var adapter))
             throw new NotSupportedException($"No deployment adapter registered for runtime '{application.RuntimeType}'.");
 
@@ -61,7 +81,7 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             ApplicationId = application.Id,
             ServerId = application.ServerId,
             State = DeploymentState.Queued,
-            CommitSha = request.CommitSha,
+            CommitSha = request.CommitSha!,
             Branch = request.Branch,
             CommitAuthor = request.CommitAuthor ?? "unknown",
             CommitMessage = request.CommitMessage ?? string.Empty,
@@ -76,7 +96,7 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
         var appSemaphore = _appLocks.GetOrAdd(application.Id, _ => new SemaphoreSlim(1, 1));
         var knownSecrets = resolvedEnvironmentVariables.Values.ToList();
 
-        void Emit(DeploymentState nextState, string msg)
+        async Task EmitAsync(DeploymentState nextState, string msg)
         {
             if (deployment.State != nextState)
                 deployment.State = DeploymentLifecycleStateMachine.TransitionOrThrow(deployment.State, nextState);
@@ -84,6 +104,9 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             var safeMsg = _secretProtector.RedactSecrets(msg, knownSecrets);
             _logger.LogInformation("[Deploy {DeploymentId} | {App}] {State}: {Message}",
                 deployment.Id, application.Slug, deployment.State, safeMsg);
+
+            if (_persistence is not null)
+                await _persistence.SaveDeploymentSnapshotAsync(deployment, CancellationToken.None).ConfigureAwait(false);
 
             progress?.Report(new DeploymentStatusUpdate(
                 deployment.Id,
@@ -99,11 +122,29 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
 
         await appSemaphore.WaitAsync(linkedCts.Token).ConfigureAwait(false);
         string? stagedDir = null;
+        var cutoverAttempted = false;
+        // Capture pre-deployment active release cleanly before any mutation
+        var rollbackCandidateDir = !string.IsNullOrWhiteSpace(application.ActiveReleasePath) && Directory.Exists(application.ActiveReleasePath)
+            ? application.ActiveReleasePath
+            : (!string.IsNullOrWhiteSpace(application.LastKnownGoodReleasePath) && Directory.Exists(application.LastKnownGoodReleasePath)
+                ? application.LastKnownGoodReleasePath
+                : null);
 
         try
         {
+            if (request.TriggeredAutomatically && _persistence is not null)
+            {
+                if (await _persistence.HasActiveOrSucceededDeploymentForCommitAsync(application.Id, deployment.CommitSha, linkedCts.Token))
+                {
+                    deployment.ErrorSummary = $"Commit {deployment.CommitSha[..8]} was already deployed or is in progress; duplicate auto-deploy skipped.";
+                    deployment.CompletedAtUtc = DateTimeOffset.UtcNow;
+                    await EmitAsync(DeploymentState.Cancelled, deployment.ErrorSummary);
+                    return deployment;
+                }
+            }
+
             deployment.StartedAtUtc = DateTimeOffset.UtcNow;
-            var shortSha = request.CommitSha.Length >= 8 ? request.CommitSha[..8] : request.CommitSha;
+            var shortSha = deployment.CommitSha[..8];
             var releaseStamp = $"{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{shortSha}";
             stagedDir = _pathGuard.EnsureWithinRoot(
                 application.ReleasesRootPath,
@@ -112,42 +153,87 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             Directory.CreateDirectory(stagedDir);
             deployment.ReleaseDirectory = stagedDir;
 
-            // Step 1: Fetching verified artifact
-            Emit(DeploymentState.Fetching, $"Fetching artifact for {application.RepositoryFullName}@{shortSha}");
-            if (!string.IsNullOrWhiteSpace(request.ArtifactDownloadUrl) && File.Exists(request.ArtifactDownloadUrl))
+            // Step 1: Fetching & Strict Provenance Verification (Problem C)
+            await EmitAsync(DeploymentState.Fetching, $"Verifying release source for {application.RepositoryFullName}@{shortSha}");
+
+            if (application.SourceMode is DeploymentSourceMode.GitHubActionsArtifact or DeploymentSourceMode.ManualSignedPackage)
             {
+                if (string.IsNullOrWhiteSpace(request.ArtifactDownloadUrl) || !File.Exists(request.ArtifactDownloadUrl))
+                {
+                    throw new FileNotFoundException(
+                        "Deployment aborted: required release artifact archive is missing on disk. ServerForge never declares success without a verified artifact.");
+                }
+
+                var zipInfo = new FileInfo(request.ArtifactDownloadUrl);
+                if (zipInfo.Length == 0)
+                {
+                    throw new InvalidDataException("Deployment aborted: release artifact archive is empty (0 bytes).");
+                }
+
+                if (string.IsNullOrWhiteSpace(request.ExpectedArtifactSha256))
+                {
+                    throw new UnauthorizedAccessException(
+                        "Deployment aborted: trusted expected SHA-256 provenance digest is required. Post-download self-hashing alone is never accepted as proof of trust.");
+                }
+
+                if (application.SourceMode == DeploymentSourceMode.GitHubActionsArtifact &&
+                    (!request.VerifiedWorkflowRunId.HasValue || !request.VerifiedArtifactId.HasValue))
+                {
+                    throw new UnauthorizedAccessException(
+                        "Deployment aborted: GitHub Actions workflow run ID and artifact identity must be verified prior to deployment.");
+                }
+
                 var actualHash = await SafeProcessRunner.ComputeFileSha256Async(request.ArtifactDownloadUrl, linkedCts.Token);
                 deployment.ArtifactSha256 = actualHash;
 
-                if (!string.IsNullOrWhiteSpace(request.ExpectedArtifactSha256) &&
-                    !actualHash.Equals(request.ExpectedArtifactSha256, StringComparison.OrdinalIgnoreCase))
+                if (!actualHash.Equals(request.ExpectedArtifactSha256.Trim(), StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException(
-                        $"Artifact SHA-256 integrity mismatch. Expected {request.ExpectedArtifactSha256}, computed {actualHash}.");
+                        $"Artifact SHA-256 integrity mismatch! Expected trusted digest {request.ExpectedArtifactSha256}, computed {actualHash}.");
                 }
 
-                // Step 2: Staging into immutable release directory (never modifies active production files)
-                Emit(DeploymentState.Staging, $"Extracting verified artifact (SHA-256: {actualHash[..12]}...) to immutable directory");
-                ExtractZipSafely(request.ArtifactDownloadUrl, stagedDir);
+                // Step 2: Safe Zip-Slip extraction into immutable directory
+                await EmitAsync(DeploymentState.Staging,
+                    $"Extracting verified artifact ({request.ArtifactTrustSource ?? "TrustedDigest"}, SHA-256: {actualHash[..12]}...) to immutable release {releaseStamp}");
+
+                var extractedFileCount = ExtractZipSafely(request.ArtifactDownloadUrl, stagedDir);
+                if (extractedFileCount == 0)
+                {
+                    throw new InvalidDataException("Deployment aborted: artifact archive contained zero files.");
+                }
             }
             else if (application.SourceMode == DeploymentSourceMode.ServerLocalBuildExplicitOptIn)
             {
-                Emit(DeploymentState.Building, "Executing explicitly opted-in server-local build workflow");
-                Emit(DeploymentState.Testing, "Running post-build verification checks");
-                Emit(DeploymentState.Packaging, "Packaging immutable release output");
-                Emit(DeploymentState.Staging, $"Staging build output into {releaseStamp}");
-            }
-            else
-            {
-                Emit(DeploymentState.Staging, $"Prepared immutable release directory {releaseStamp}");
+                if (string.IsNullOrWhiteSpace(application.BuildCommand))
+                {
+                    throw new InvalidOperationException(
+                        "Server-local build mode is enabled, but no BuildCommand is configured.");
+                }
+
+                await EmitAsync(DeploymentState.Building, $"Running explicitly opted-in server-local build: {application.BuildCommand}");
+                var buildRes = await SafeProcessRunner.RunAsync(
+                    OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+                    OperatingSystem.IsWindows() ? ["/c", application.BuildCommand] : ["-c", application.BuildCommand],
+                    workingDirectory: stagedDir,
+                    environmentVariables: resolvedEnvironmentVariables,
+                    cancellationToken: linkedCts.Token).ConfigureAwait(false);
+
+                if (buildRes.ExitCode != 0)
+                    throw new InvalidOperationException($"Server-local build failed (exit {buildRes.ExitCode}): {buildRes.StandardError}");
+
+                await EmitAsync(DeploymentState.Staging, $"Staged server-local build output in {releaseStamp}");
             }
 
-            // Ensure persistent data directory exists and is never wiped
+            // Step 3: Validate required runtime application files before touching IIS/Windows Services
+            ValidateStagedApplicationFiles(application.RuntimeType, stagedDir);
+
+            // Preserve persistent data directory untouched
             if (!string.IsNullOrWhiteSpace(application.PersistentDataPath))
                 Directory.CreateDirectory(application.PersistentDataPath);
 
-            // Step 3: Deploying via stack-specific adapter
-            Emit(DeploymentState.Deploying, $"Executing {application.RuntimeType} adapter. {adapter.ZeroDowntimeExplanation}");
+            // Step 4: Deploying via stack-specific adapter
+            cutoverAttempted = true;
+            await EmitAsync(DeploymentState.Deploying, $"Executing {application.RuntimeType} adapter. {adapter.ZeroDowntimeExplanation}");
             var deployResult = await adapter.DeployStagedReleaseAsync(
                 application,
                 stagedDir,
@@ -161,22 +247,26 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             if (!deployResult.Succeeded)
                 throw new InvalidOperationException(deployResult.ErrorMessage ?? "Adapter deployment failed.");
 
-            // Step 4: Verifying readiness via HTTP health check
-            Emit(DeploymentState.Verifying, $"Probing readiness endpoint '{application.HealthCheckPath}'");
+            // Step 5: Verifying readiness via HTTP health check (missing health endpoint fails cleanly)
+            await EmitAsync(DeploymentState.Verifying, $"Probing readiness endpoint '{application.HealthCheckPath}'");
             var healthy = await VerifyHealthAsync(application, linkedCts.Token).ConfigureAwait(false);
             if (!healthy)
                 throw new InvalidOperationException($"Health check failed for '{application.Name}' at '{application.HealthCheckPath}'.");
 
-            // Step 5: Promote release and prune old releases beyond retention policy
-            application.LastKnownGoodReleasePath = application.ActiveReleasePath ?? stagedDir;
+            // Step 6: Promote release ONLY AFTER health verification passes (Problem G)
+            if (!string.IsNullOrWhiteSpace(rollbackCandidateDir))
+                application.LastKnownGoodReleasePath = rollbackCandidateDir;
+            else
+                application.LastKnownGoodReleasePath = stagedDir; // First healthy release becomes baseline LKG
+
             application.ActiveReleasePath = stagedDir;
-            application.LastDeployedCommitSha = request.CommitSha;
+            application.LastDeployedCommitSha = deployment.CommitSha;
             application.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
             PruneOldReleases(application);
 
             deployment.CompletedAtUtc = DateTimeOffset.UtcNow;
-            Emit(DeploymentState.Successful, $"Release {releaseStamp} verified healthy and active.");
+            await EmitAsync(DeploymentState.Successful, $"Release {releaseStamp} verified healthy and promoted.");
             return deployment;
         }
         catch (OperationCanceledException)
@@ -184,8 +274,9 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             deployment.ErrorSummary = "Deployment cancelled by operator.";
             deployment.CompletedAtUtc = DateTimeOffset.UtcNow;
             if (!DeploymentLifecycleStateMachine.IsTerminal(deployment.State))
-                Emit(DeploymentState.Cancelled, "Deployment cancelled; production release untouched.");
-            CleanupFailedStagingDirectory(stagedDir, application.ActiveReleasePath);
+                await EmitAsync(DeploymentState.Cancelled, "Deployment cancelled; production release untouched.");
+            if (!cutoverAttempted)
+                CleanupFailedStagingDirectory(stagedDir, application.ActiveReleasePath);
             return deployment;
         }
         catch (Exception ex)
@@ -194,29 +285,39 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             deployment.CompletedAtUtc = DateTimeOffset.UtcNow;
 
             if (DeploymentLifecycleStateMachine.CanTransition(deployment.State, DeploymentState.Failed))
-                Emit(DeploymentState.Failed, $"Deployment failed: {deployment.ErrorSummary}");
+                await EmitAsync(DeploymentState.Failed, $"Deployment failed: {deployment.ErrorSummary}");
 
-            // Automatic application rollback (never runs destructive database rollbacks)
-            if (application.AutoRollbackOnFailure &&
-                !string.IsNullOrWhiteSpace(application.LastKnownGoodReleasePath) &&
-                Directory.Exists(application.LastKnownGoodReleasePath))
+            // Automatic application rollback if cutover was attempted and a previous healthy release exists
+            if (cutoverAttempted &&
+                application.AutoRollbackOnFailure &&
+                !string.IsNullOrWhiteSpace(rollbackCandidateDir) &&
+                Directory.Exists(rollbackCandidateDir))
             {
                 try
                 {
                     await adapter.RollbackReleaseAsync(
                         application,
-                        application.LastKnownGoodReleasePath,
+                        rollbackCandidateDir,
                         line => _logger.LogWarning("[Rollback {App}] {Line}", application.Slug, line),
                         CancellationToken.None).ConfigureAwait(false);
 
-                    application.ActiveReleasePath = application.LastKnownGoodReleasePath;
-                    Emit(DeploymentState.RolledBack,
+                    application.ActiveReleasePath = rollbackCandidateDir;
+                    application.LastKnownGoodReleasePath = rollbackCandidateDir;
+                    await EmitAsync(DeploymentState.RolledBack,
                         "Application rolled back to last known good release. Database schema was intentionally NOT altered.");
                 }
                 catch (Exception rbEx)
                 {
-                    _logger.LogError(rbEx, "Rollback failed for {App}", application.Slug);
+                    deployment.ErrorSummary += $" | ROLLBACK FAILED: {_secretProtector.RedactSecrets(rbEx.Message, knownSecrets)}";
+                    if (_persistence is not null)
+                        await _persistence.SaveDeploymentSnapshotAsync(deployment, CancellationToken.None).ConfigureAwait(false);
+                    _logger.LogError(rbEx, "Rollback failed for {App}; manual recovery required.", application.Slug);
                 }
+            }
+            else if (!cutoverAttempted)
+            {
+                // Failed before touching IIS/services (e.g. missing/corrupt artifact or first deployment failure)
+                CleanupFailedStagingDirectory(stagedDir, application.ActiveReleasePath);
             }
 
             return deployment;
@@ -269,6 +370,8 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             };
 
             application.ActiveReleasePath = application.LastKnownGoodReleasePath;
+            if (_persistence is not null)
+                await _persistence.SaveDeploymentSnapshotAsync(record, cancellationToken).ConfigureAwait(false);
             return record;
         }
         finally
@@ -287,16 +390,52 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
         return false;
     }
 
+    public static void ValidateStagedApplicationFiles(ApplicationRuntimeType runtime, string stagedDir)
+    {
+        var files = Directory.GetFiles(stagedDir, "*", SearchOption.AllDirectories);
+        if (files.Length == 0)
+            throw new InvalidDataException("Staged release directory contains no application files.");
+
+        var hasRequired = runtime switch
+        {
+            ApplicationRuntimeType.NextJsSsr =>
+                files.Any(f => Path.GetFileName(f).Equals("server.js", StringComparison.OrdinalIgnoreCase) ||
+                               Path.GetFileName(f).Equals("package.json", StringComparison.OrdinalIgnoreCase)),
+            ApplicationRuntimeType.NestJsApi or ApplicationRuntimeType.ExpressApi or ApplicationRuntimeType.NodeJsGeneric =>
+                files.Any(f => Path.GetFileName(f).Equals("package.json", StringComparison.OrdinalIgnoreCase) ||
+                               f.EndsWith(".js", StringComparison.OrdinalIgnoreCase) ||
+                               f.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase)),
+            ApplicationRuntimeType.ReactViteStatic or ApplicationRuntimeType.StaticHtml =>
+                files.Any(f => Path.GetFileName(f).Equals("index.html", StringComparison.OrdinalIgnoreCase)),
+            ApplicationRuntimeType.AspNetCore =>
+                files.Any(f => f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
+                               Path.GetFileName(f).Equals("web.config", StringComparison.OrdinalIgnoreCase)),
+            ApplicationRuntimeType.ClassicAsp =>
+                files.Any(f => f.EndsWith(".asp", StringComparison.OrdinalIgnoreCase) ||
+                               f.EndsWith(".htm", StringComparison.OrdinalIgnoreCase) ||
+                               f.EndsWith(".html", StringComparison.OrdinalIgnoreCase)),
+            ApplicationRuntimeType.PythonFastApi =>
+                files.Any(f => f.EndsWith(".py", StringComparison.OrdinalIgnoreCase)),
+            _ => true
+        };
+
+        if (!hasRequired)
+        {
+            throw new InvalidDataException(
+                $"Staged release failed application-file validation for runtime '{runtime}': expected runtime entry files were not found in the extracted artifact.");
+        }
+    }
+
     private async Task<bool> VerifyHealthAsync(ManagedApplication app, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(app.HealthCheckPath))
-            return true;
+            return false; // Require an explicit readiness path rather than blindly assuming healthy
 
         var probeUrl = ApplicationConfigValidator.RequiresInternalPort(app.RuntimeType)
             ? $"http://127.0.0.1:{app.InternalPort}/{app.HealthCheckPath.TrimStart('/')}"
             : $"http://{app.PrimaryDomain}/{app.HealthCheckPath.TrimStart('/')}";
 
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(app.HealthCheckTimeoutSeconds, 5, 180));
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(app.HealthCheckTimeoutSeconds, 3, 180));
         while (DateTimeOffset.UtcNow < deadline && !ct.IsCancellationRequested)
         {
             try
@@ -307,17 +446,18 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             }
             catch
             {
-                // Retry until timeout
+                // Retry until timeout expires
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromMilliseconds(500), ct).ConfigureAwait(false);
         }
 
         return false;
     }
 
-    private void ExtractZipSafely(string zipPath, string destinationRoot)
+    private int ExtractZipSafely(string zipPath, string destinationRoot)
     {
+        var count = 0;
         using var archive = ZipFile.OpenRead(zipPath);
         foreach (var entry in archive.Entries)
         {
@@ -327,7 +467,9 @@ public sealed class DeploymentOrchestrator : IDeploymentEngine
             var targetPath = _pathGuard.EnsureWithinRoot(destinationRoot, entry.FullName);
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
             entry.ExtractToFile(targetPath, overwrite: true);
+            count++;
         }
+        return count;
     }
 
     private static void PruneOldReleases(ManagedApplication app)

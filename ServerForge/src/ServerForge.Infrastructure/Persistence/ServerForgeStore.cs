@@ -1,10 +1,11 @@
 using Microsoft.EntityFrameworkCore;
+using ServerForge.Contracts.Enums;
 using ServerForge.Core.Entities;
 using ServerForge.Core.Interfaces;
 
 namespace ServerForge.Infrastructure.Persistence;
 
-public sealed class ServerForgeStore
+public sealed class ServerForgeStore : IDeploymentStatePersistence
 {
     private readonly IDbContextFactory<ServerForgeDbContext> _factory;
     private readonly ISecretProtector _secretProtector;
@@ -15,18 +16,153 @@ public sealed class ServerForgeStore
         _secretProtector = secretProtector;
     }
 
+    // ---- Local Admin & Encrypted Vault Secrets (Problem E) ----
+
     public async Task<bool> HasLocalAdminAsync(CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);
         return await db.AdminProfiles.AnyAsync(ct);
     }
 
+    public async Task<LocalAdminProfile?> GetLocalAdminAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.AdminProfiles.OrderBy(a => a.CreatedAtUtc).FirstOrDefaultAsync(ct);
+    }
+
     public async Task SaveLocalAdminAsync(LocalAdminProfile profile, CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);
-        db.AdminProfiles.Add(profile);
+        var existing = await db.AdminProfiles.FindAsync([profile.Id], ct);
+        if (existing is null)
+            db.AdminProfiles.Add(profile);
+        else
+            db.Entry(existing).CurrentValues.SetValues(profile);
         await db.SaveChangesAsync(ct);
     }
+
+    public async Task SaveVaultSecretAsync(string key, string plaintextValue, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var protectedBlob = _secretProtector.Protect(plaintextValue, $"vault:{key}");
+        var existing = await db.VaultSecrets.FindAsync([key], ct);
+        if (existing is null)
+        {
+            db.VaultSecrets.Add(new VaultSecretRecord
+            {
+                Key = key,
+                ProtectedValue = protectedBlob,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+        }
+        else
+        {
+            existing.ProtectedValue = protectedBlob;
+            existing.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        }
+
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = "Vault.SecretUpdated",
+            TargetResource = key,
+            Details = "Encrypted via DPAPI; plaintext never persisted or logged."
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<string?> GetVaultSecretAsync(string key, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var record = await db.VaultSecrets.FindAsync([key], ct);
+        if (record is null || string.IsNullOrWhiteSpace(record.ProtectedValue))
+            return null;
+
+        return _secretProtector.Unprotect(record.ProtectedValue, $"vault:{key}");
+    }
+
+    // ---- Paired Servers Persistence (Problem E) ----
+
+    public async Task<IReadOnlyList<ManagedServer>> GetServersAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.Servers.OrderBy(s => s.DisplayName).ToListAsync(ct);
+    }
+
+    public async Task UpsertServerAsync(ManagedServer server, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.Servers.FirstOrDefaultAsync(
+            s => s.Id == server.Id || (!string.IsNullOrEmpty(server.AgentId) && s.AgentId == server.AgentId), ct);
+
+        if (existing is null)
+        {
+            db.Servers.Add(server);
+        }
+        else
+        {
+            server.Id = existing.Id;
+            db.Entry(existing).CurrentValues.SetValues(server);
+        }
+
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = existing is null ? "Server.Paired" : "Server.Updated",
+            TargetResource = $"{server.DisplayName} ({server.HostAddress}:{server.AgentPort})",
+            ServerId = server.Id,
+            Details = $"Status={server.Status}; PinnedCert={server.PinnedServerCertThumbprint[..Math.Min(12, server.PinnedServerCertThumbprint.Length)]}"
+        });
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task DeleteServerAsync(Guid serverId, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var server = await db.Servers.FindAsync([serverId], ct);
+        if (server is null) return;
+
+        db.Servers.Remove(server);
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = "Server.Unpaired",
+            TargetResource = server.DisplayName,
+            ServerId = serverId,
+            Details = "Removed server connection record from local ServerForge Desktop store."
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    // ---- Projects ----
+
+    public async Task<IReadOnlyList<ProjectGroup>> GetProjectsAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.Projects.Include(p => p.Applications).OrderBy(p => p.Name).ToListAsync(ct);
+    }
+
+    public async Task UpsertProjectAsync(ProjectGroup project, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.Projects.FindAsync([project.Id], ct);
+        if (existing is null)
+            db.Projects.Add(project);
+        else
+            db.Entry(existing).CurrentValues.SetValues(project);
+
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = existing is null ? "Project.Created" : "Project.Updated",
+            TargetResource = $"{project.Name} ({project.Slug})",
+            Details = project.Description
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    // ---- Applications ----
 
     public async Task<IReadOnlyList<ManagedApplication>> GetApplicationsAsync(CancellationToken ct = default)
     {
@@ -34,10 +170,29 @@ public sealed class ServerForgeStore
         return await db.Applications.OrderBy(a => a.Name).ToListAsync(ct);
     }
 
+    public async Task<ManagedApplication?> GetApplicationByIdAsync(Guid id, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.Applications.FindAsync([id], ct);
+    }
+
     public async Task UpsertApplicationAsync(ManagedApplication app, string actor, CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);
         app.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+        // Ensure referenced ProjectGroup exists when Agent receives app directly
+        if (app.ProjectGroupId != Guid.Empty && !await db.Projects.AnyAsync(p => p.Id == app.ProjectGroupId, ct))
+        {
+            db.Projects.Add(new ProjectGroup
+            {
+                Id = app.ProjectGroupId,
+                Name = "Default Project",
+                Slug = $"project-{app.ProjectGroupId.ToString("N")[..8]}",
+                Description = "Auto-registered project group"
+            });
+        }
+
         var existing = await db.Applications.FindAsync([app.Id], ct);
         if (existing is null)
             db.Applications.Add(app);
@@ -57,9 +212,45 @@ public sealed class ServerForgeStore
         await db.SaveChangesAsync(ct);
     }
 
+    /// <summary>
+    /// Removes an application from ServerForge management WITHOUT deleting hosted files, IIS sites, or databases.
+    /// </summary>
+    public async Task<bool> RemoveApplicationFromManagementAsync(Guid applicationId, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.Applications.FindAsync([applicationId], ct);
+        if (existing is null) return false;
+
+        db.Applications.Remove(existing);
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = "Application.RemovedFromManagement",
+            TargetResource = $"{existing.Name} ({existing.Slug})",
+            ApplicationId = applicationId,
+            Details = "Removed from ServerForge management registry only; hosted release files, IIS sites, and databases were NOT deleted."
+        });
+
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    // ---- Environment Variables ----
+
+    public async Task<IReadOnlyList<EnvironmentVariableRecord>> GetEnvironmentVariablesAsync(
+        Guid applicationId,
+        EnvironmentTier? tier = null,
+        CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var q = db.EnvironmentVariables.Where(v => v.ApplicationId == applicationId);
+        if (tier.HasValue) q = q.Where(v => v.Tier == tier.Value);
+        return await q.OrderBy(v => v.Key).ToListAsync(ct);
+    }
+
     public async Task SaveEnvironmentVariableAsync(
         Guid applicationId,
-        Contracts.Enums.EnvironmentTier tier,
+        EnvironmentTier tier,
         string key,
         string plaintextValue,
         bool isSecret,
@@ -108,9 +299,27 @@ public sealed class ServerForgeStore
         await db.SaveChangesAsync(ct);
     }
 
+    public async Task DeleteEnvironmentVariableAsync(Guid envVarId, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.EnvironmentVariables.FindAsync([envVarId], ct);
+        if (existing is null) return;
+
+        db.EnvironmentVariables.Remove(existing);
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = "EnvVar.Deleted",
+            TargetResource = $"{existing.Tier}/{existing.Key}",
+            ApplicationId = existing.ApplicationId,
+            Details = "Removed environment variable."
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
     public async Task<Dictionary<string, string>> ResolveDecryptedEnvVarsAsync(
         Guid applicationId,
-        Contracts.Enums.EnvironmentTier tier,
+        EnvironmentTier tier,
         CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);
@@ -129,6 +338,86 @@ public sealed class ServerForgeStore
         return result;
     }
 
+    // ---- Domains, Databases, Backups ----
+
+    public async Task<IReadOnlyList<DomainBindingRecord>> GetDomainsAsync(Guid? applicationId = null, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var q = db.DomainBindings.AsQueryable();
+        if (applicationId.HasValue) q = q.Where(d => d.ApplicationId == applicationId.Value);
+        return await q.OrderBy(d => d.Hostname).ToListAsync(ct);
+    }
+
+    public async Task UpsertDomainAsync(DomainBindingRecord domain, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.DomainBindings.FindAsync([domain.Id], ct);
+        if (existing is null) db.DomainBindings.Add(domain);
+        else db.Entry(existing).CurrentValues.SetValues(domain);
+
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = "Domain.Configured",
+            TargetResource = domain.Hostname,
+            ApplicationId = domain.ApplicationId,
+            ServerId = domain.ServerId,
+            Details = $"HTTPS={domain.HttpsEnabled}; WinAcme={domain.UseWinAcmeLetsEncrypt}; DnsVerified={domain.DnsVerified}"
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<DatabaseServerRecord>> GetDatabaseServersAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.DatabaseServers.OrderBy(d => d.DisplayName).ToListAsync(ct);
+    }
+
+    public async Task UpsertDatabaseServerAsync(DatabaseServerRecord record, string? plaintextConnectionString, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        if (!string.IsNullOrWhiteSpace(plaintextConnectionString))
+            record.ProtectedConnectionString = _secretProtector.Protect(plaintextConnectionString, $"db:{record.Id}");
+
+        var existing = await db.DatabaseServers.FindAsync([record.Id], ct);
+        if (existing is null) db.DatabaseServers.Add(record);
+        else db.Entry(existing).CurrentValues.SetValues(record);
+
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = existing is null ? "DatabaseServer.Added" : "DatabaseServer.Updated",
+            TargetResource = $"{record.DisplayName} ({record.Engine})",
+            Details = $"ExternalManaged={record.IsExternalManagedInfrastructure}; PublicPortExposed={record.ExposePublicly}"
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<BackupJobRecord>> GetBackupJobsAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.BackupJobs.OrderBy(b => b.TargetName).ToListAsync(ct);
+    }
+
+    public async Task UpsertBackupJobAsync(BackupJobRecord job, string actor, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.BackupJobs.FindAsync([job.Id], ct);
+        if (existing is null) db.BackupJobs.Add(job);
+        else db.Entry(existing).CurrentValues.SetValues(job);
+
+        db.AuditLogs.Add(new AuditLogRecord
+        {
+            Actor = actor,
+            Action = "BackupJob.Saved",
+            TargetResource = job.TargetName,
+            Details = $"Type={job.BackupType}; Schedule={job.ScheduleCron}; RetentionDays={job.RetentionDays}"
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    // ---- Deployments & Crash Recovery (Problem G) ----
+
     public async Task RecordDeploymentAsync(DeploymentRecord record, CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);
@@ -138,6 +427,59 @@ public sealed class ServerForgeStore
         else
             db.Entry(existing).CurrentValues.SetValues(record);
         await db.SaveChangesAsync(ct);
+    }
+
+    public Task SaveDeploymentSnapshotAsync(DeploymentRecord record, CancellationToken ct = default)
+        => RecordDeploymentAsync(record, ct);
+
+    public async Task<bool> HasActiveOrSucceededDeploymentForCommitAsync(Guid applicationId, string commitSha, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.Deployments.AnyAsync(d =>
+            d.ApplicationId == applicationId &&
+            d.CommitSha == commitSha &&
+            (d.State == DeploymentState.Successful ||
+             d.State == DeploymentState.Queued ||
+             d.State == DeploymentState.Fetching ||
+             d.State == DeploymentState.Building ||
+             d.State == DeploymentState.Staging ||
+             d.State == DeploymentState.Deploying ||
+             d.State == DeploymentState.Verifying), ct);
+    }
+
+    /// <summary>
+    /// Marks any non-terminal deployments left behind by an unexpected Agent restart as Failed
+    /// so operators see accurate recovery status and the queue is never stuck.
+    /// </summary>
+    public async Task<int> RecoverInterruptedDeploymentsAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var interrupted = await db.Deployments
+            .Where(d => d.State != DeploymentState.Successful &&
+                        d.State != DeploymentState.Failed &&
+                        d.State != DeploymentState.RolledBack &&
+                        d.State != DeploymentState.Cancelled)
+            .ToListAsync(ct);
+
+        foreach (var d in interrupted)
+        {
+            d.State = DeploymentState.Failed;
+            d.CompletedAtUtc = DateTimeOffset.UtcNow;
+            d.ErrorSummary = "Deployment was interrupted by an unexpected ServerForge Agent restart. Previous healthy release preserved.";
+            db.AuditLogs.Add(new AuditLogRecord
+            {
+                Actor = "ServerForge.Agent.Recovery",
+                Action = "Deployment.InterruptedRecovery",
+                TargetResource = d.Id.ToString("N"),
+                ApplicationId = d.ApplicationId,
+                Details = d.ErrorSummary
+            });
+        }
+
+        if (interrupted.Count > 0)
+            await db.SaveChangesAsync(ct);
+
+        return interrupted.Count;
     }
 
     public async Task<IReadOnlyList<DeploymentRecord>> GetDeploymentHistoryAsync(Guid? applicationId = null, int take = 50, CancellationToken ct = default)

@@ -1,22 +1,26 @@
 <Window x:Class="ServerForge.Desktop.Views.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:pages="clr-namespace:ServerForge.Desktop.Views.Pages"
         Title="ServerForge — Native Windows Self-Hosted Deployment Platform"
-        Width="1360" Height="860"
-        MinWidth="1024" MinHeight="680"
+        Width="1380" Height="880"
+        MinWidth="1040" MinHeight="680"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource CanvasBackgroundBrush}"
         Foreground="{DynamicResource TextPrimaryBrush}">
     <Window.InputBindings>
         <KeyBinding Key="D1" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Overview" />
-        <KeyBinding Key="D2" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Applications" />
-        <KeyBinding Key="D3" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Deployments" />
+        <KeyBinding Key="D2" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Projects" />
+        <KeyBinding Key="D3" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Applications" />
         <KeyBinding Key="D4" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="GitHub" />
-        <KeyBinding Key="D5" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Domains" />
-        <KeyBinding Key="D6" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="EnvVars" />
-        <KeyBinding Key="D7" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Databases" />
-        <KeyBinding Key="D8" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Servers" />
-        <KeyBinding Key="D9" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Monitoring" />
+        <KeyBinding Key="D5" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Deployments" />
+        <KeyBinding Key="D6" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Domains" />
+        <KeyBinding Key="D7" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="EnvVars" />
+        <KeyBinding Key="D8" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Databases" />
+        <KeyBinding Key="D9" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Servers" />
+        <KeyBinding Key="M" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Monitoring" />
+        <KeyBinding Key="L" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Logs" />
+        <KeyBinding Key="B" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Backups" />
         <KeyBinding Key="T" Modifiers="Ctrl" Command="{Binding ToggleThemeCommand}" />
     </Window.InputBindings>
 
@@ -26,7 +30,7 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <!-- Native WPF Navigation Sidebar (12 Required Sections) -->
+        <!-- Native WPF Navigation Sidebar (All 13 Functional Sections) -->
         <Border Grid.Column="0" Background="{DynamicResource SidebarBackgroundBrush}" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,0,1,0">
             <DockPanel LastChildFill="True">
                 <StackPanel DockPanel.Dock="Top" Margin="18,18,18,14">
@@ -34,7 +38,6 @@
                     <TextBlock Text="Windows Deployment Control" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" />
                 </StackPanel>
 
-                <!-- Explicit Mode & Theme Footer -->
                 <StackPanel DockPanel.Dock="Bottom" Margin="12,12,12,16">
                     <Button Content="Toggle Theme (Ctrl+T)" Command="{Binding ToggleThemeCommand}" Margin="0,0,0,6" Padding="10,7" />
                     <Button Content="Toggle Isolated Demo Mode" Command="{Binding ToggleDemoModeCommand}" Padding="10,7" />
@@ -65,6 +68,7 @@
         <Grid Grid.Column="1">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
@@ -75,72 +79,91 @@
                         <TextBlock Text="{Binding SelectedSection.Title}" FontSize="20" FontWeight="SemiBold" />
                         <TextBlock Text="{Binding SelectedSection.Description}" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" />
                     </StackPanel>
-                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                        <Button Content="Refresh Live State" Command="{Binding RefreshLiveDataCommand}" Style="{StaticResource PrimaryButtonStyle}" />
-                    </StackPanel>
+                    <Button Content="Refresh Live State" Command="{Binding RefreshLiveDataCommand}" DockPanel.Dock="Right" VerticalAlignment="Center" Style="{StaticResource PrimaryButtonStyle}" />
                 </DockPanel>
             </Border>
 
-            <!-- Active Section Canvas -->
-            <ScrollViewer Grid.Row="1" Padding="24" VerticalScrollBarVisibility="Auto">
-                <StackPanel>
-                    <!-- Explicit Live vs Demo Mode Banner -->
-                    <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
-                        <DockPanel>
-                            <TextBlock Text="{Binding StatusMessage}" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap" />
-                        </DockPanel>
-                    </Border>
+            <!-- Status & Error Feedback Strip -->
+            <StackPanel Grid.Row="1" Margin="24,14,24,0">
+                <TextBlock Text="{Binding StatusMessage}" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding ErrorMessage}" FontSize="12" Foreground="{DynamicResource DangerBrush}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,4,0,0" />
+            </StackPanel>
 
-                    <!-- Applications Grid -->
-                    <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
-                        <StackPanel>
-                            <TextBlock Text="Managed Applications" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
-                            <DataGrid ItemsSource="{Binding Applications}" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" MinHeight="140">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
-                                    <DataGridTextColumn Header="Runtime" Binding="{Binding RuntimeType}" Width="*" />
-                                    <DataGridTextColumn Header="Repository" Binding="{Binding RepositoryFullName}" Width="2*" />
-                                    <DataGridTextColumn Header="Branch" Binding="{Binding Branch}" Width="*" />
-                                    <DataGridTextColumn Header="Domain" Binding="{Binding PrimaryDomain}" Width="1.5*" />
-                                    <DataGridTextColumn Header="Port" Binding="{Binding InternalPort}" Width="80" />
-                                    <DataGridTextColumn Header="Auto Deploy" Binding="{Binding AutoDeployEnabled}" Width="90" />
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Existing Unmanaged IIS Protection Inventory -->
-                    <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
-                        <StackPanel>
-                            <TextBlock Text="Discovered IIS Websites (Pre-existing Sites Protected Read-Only)" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
-                            <DataGrid ItemsSource="{Binding DiscoveredIisSites}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="110">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Site Name" Binding="{Binding Name}" Width="2*" />
-                                    <DataGridTextColumn Header="State" Binding="{Binding State}" Width="*" />
-                                    <DataGridTextColumn Header="AppPool" Binding="{Binding AppPoolName}" Width="1.5*" />
-                                    <DataGridTextColumn Header="Classic ASP" Binding="{Binding ContainsClassicAspIndicators}" Width="95" />
-                                    <DataGridTextColumn Header="Protection" Binding="{Binding ManagementState}" Width="1.5*" />
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Deployment History & Audit Trail -->
-                    <Border Style="{StaticResource CardContainerStyle}">
-                        <StackPanel>
-                            <TextBlock Text="Deployment Lifecycle History &amp; Audit Events" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
-                            <DataGrid ItemsSource="{Binding Deployments}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="140">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="State" Binding="{Binding State}" Width="120" />
-                                    <DataGridTextColumn Header="Commit" Binding="{Binding CommitSha}" Width="120" />
-                                    <DataGridTextColumn Header="Branch" Binding="{Binding Branch}" Width="100" />
-                                    <DataGridTextColumn Header="Trigger" Binding="{Binding TriggeredBy}" Width="150" />
-                                    <DataGridTextColumn Header="Zero-Downtime Note" Binding="{Binding ZeroDowntimeNote}" Width="2*" />
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </StackPanel>
-                    </Border>
-                </StackPanel>
+            <!-- Dynamic Native WPF Page Host (Routes to All 13 Separate Views) -->
+            <ScrollViewer Grid.Row="2" Padding="24" VerticalScrollBarVisibility="Auto">
+                <ContentControl Content="{Binding}">
+                    <ContentControl.Style>
+                        <Style TargetType="ContentControl">
+                            <Setter Property="ContentTemplate">
+                                <Setter.Value>
+                                    <DataTemplate><pages:OverviewView /></DataTemplate>
+                                </Setter.Value>
+                            </Setter>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Projects">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:ProjectsView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Applications">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:ApplicationsView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="GitHub">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:GitHubView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Deployments">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:DeploymentsView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Domains">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:DomainsSslView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="EnvVars">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:EnvironmentVariablesView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Databases">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:DatabasesView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Servers">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:ServersView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Monitoring">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:MonitoringView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Logs">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:LogsView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Backups">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:BackupsView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SelectedSection.Key}" Value="Settings">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value><DataTemplate><pages:SettingsView /></DataTemplate></Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ContentControl.Style>
+                </ContentControl>
             </ScrollViewer>
         </Grid>
     </Grid>

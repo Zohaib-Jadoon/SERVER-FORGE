@@ -11,7 +11,8 @@ using ServerForge.Security.Secrets;
 namespace ServerForge.Desktop.ViewModels;
 
 /// <summary>
-/// 10-step First-Launch Setup Wizard ViewModel (no cloud ServerForge account required).
+/// 10-step First-Launch Setup Wizard ViewModel that persists local admin, DPAPI GitHub PAT,
+/// and paired Windows Server certificate identities directly to local SQLite (Problem E).
 /// </summary>
 public sealed partial class SetupWizardViewModel : ObservableObject
 {
@@ -38,19 +39,15 @@ public sealed partial class SetupWizardViewModel : ObservableObject
     [ObservableProperty] private string _statusBanner = string.Empty;
     [ObservableProperty] private bool _isBusy;
 
-    // Step 2: Local Administrator Profile
     [ObservableProperty] private string _adminDisplayName = Environment.UserName;
     [ObservableProperty] private string _adminUsername = Environment.UserName;
     [ObservableProperty] private string _adminPassword = string.Empty;
 
-    // Step 3: DPAPI Credential Store
     [ObservableProperty] private bool _dpapiVerified;
 
-    // Step 4: GitHub Fine-Grained PAT
     [ObservableProperty] private string _gitHubToken = string.Empty;
     [ObservableProperty] private string _gitHubValidationSummary = "Not connected yet (optional — can be configured later in Settings).";
 
-    // Step 5–7: Windows Server + Agent Pairing
     [ObservableProperty] private bool _addServerNow = true;
     [ObservableProperty] private string _serverDisplayName = "Primary Windows Server";
     [ObservableProperty] private string _serverHostAddress = "10.0.0.10";
@@ -60,7 +57,6 @@ public sealed partial class SetupWizardViewModel : ObservableObject
     [ObservableProperty] private string _pairingStatus = "Pending pairing ceremony.";
     [ObservableProperty] private ManagedServer? _pairedServer;
 
-    // Step 8–9: Read-Only Server Diagnostics
     [ObservableProperty] private ServerDiagnosticsSnapshot? _diagnosticsSnapshot;
 
     public string StepTitle => CurrentStep switch
@@ -152,9 +148,15 @@ public sealed partial class SetupWizardViewModel : ObservableObject
         try
         {
             var res = await _githubClient.ValidateTokenAsync(GitHubToken.Trim(), CancellationToken.None);
-            GitHubValidationSummary = res.IsValid
-                ? $"Connected as @{res.Login} ({res.AccountName}) · Rate Limit Remaining: {res.RateLimitRemaining}"
-                : $"Validation failed: {res.ErrorMessage}";
+            if (res.IsValid)
+            {
+                await _store.SaveVaultSecretAsync("github:pat", GitHubToken.Trim(), AdminUsername);
+                GitHubValidationSummary = $"Connected & DPAPI-saved as @{res.Login} ({res.AccountName}) · Rate Limit: {res.RateLimitRemaining}";
+            }
+            else
+            {
+                GitHubValidationSummary = $"Validation failed: {res.ErrorMessage}";
+            }
         }
         finally
         {
@@ -188,10 +190,18 @@ public sealed partial class SetupWizardViewModel : ObservableObject
                 HostAddress = ServerHostAddress.Trim(),
                 AgentPort = ServerAgentPort,
                 PinnedServerCertThumbprint = resp.AgentCertificateThumbprint,
+                ClientCertThumbprint = _agentTransport.GetCurrentClientThumbprint(),
                 Status = ServerConnectionStatus.Connected,
                 LastSeenUtc = DateTimeOffset.UtcNow
             };
-            PairingStatus = $"Mutual-TLS pairing succeeded with {resp.Hostname} (Agent {resp.AgentId[..8]}).";
+
+            // Persist immediately to local SQLite so restarts never require re-pairing (Problem E)
+            await _store.UpsertServerAsync(PairedServer, AdminUsername);
+
+            if (!string.IsNullOrWhiteSpace(GitHubToken))
+                await _agentTransport.SyncGitHubPatAsync(PairedServer, GitHubToken.Trim(), CancellationToken.None);
+
+            PairingStatus = $"Mutual-TLS pairing persisted to local SQLite for {resp.Hostname} (Agent {resp.AgentId[..8]}).";
         }
         catch (Exception ex)
         {
@@ -216,9 +226,15 @@ public sealed partial class SetupWizardViewModel : ObservableObject
         try
         {
             DiagnosticsSnapshot = await _agentTransport.FetchDiagnosticsAsync(PairedServer, CancellationToken.None);
-            StatusBanner = DiagnosticsSnapshot is not null
-                ? $"Diagnostics captured from {DiagnosticsSnapshot.Hostname}: {DiagnosticsSnapshot.ExistingIisSites.Count} existing IIS sites marked read-only."
-                : "Agent returned no diagnostic payload.";
+            if (DiagnosticsSnapshot is not null)
+            {
+                PairedServer.OsVersion = DiagnosticsSnapshot.OsVersion;
+                PairedServer.IisVersion = DiagnosticsSnapshot.IisVersion;
+                PairedServer.LastSeenUtc = DateTimeOffset.UtcNow;
+                await _store.UpsertServerAsync(PairedServer, AdminUsername);
+
+                StatusBanner = $"Diagnostics captured from {DiagnosticsSnapshot.Hostname}: {DiagnosticsSnapshot.ExistingIisSites.Count} existing IIS site(s) protected read-only.";
+            }
         }
         catch (Exception ex)
         {
@@ -247,6 +263,12 @@ public sealed partial class SetupWizardViewModel : ObservableObject
                 DarkThemeEnabled = true,
                 DemoModeEnabled = false
             });
+
+            if (PairedServer is not null)
+                await _store.UpsertServerAsync(PairedServer, AdminUsername);
+
+            if (!string.IsNullOrWhiteSpace(GitHubToken))
+                await _store.SaveVaultSecretAsync("github:pat", GitHubToken.Trim(), AdminUsername);
 
             WizardCompleted?.Invoke(this, true);
         }

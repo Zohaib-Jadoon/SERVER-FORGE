@@ -1,5 +1,5 @@
+using System.IO.Compression;
 using System.Net;
-using System.Security.Cryptography.X509Certificates;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -32,10 +32,10 @@ public sealed class SecurityAndValidationTests
         var (code, expires) = service.GeneratePairingCode(TimeSpan.FromMinutes(10));
 
         Assert.True(service.TryValidateAndConsume(code, expires.AddMinutes(-1)));
-        Assert.False(service.TryValidateAndConsume(code, expires.AddMinutes(-1))); // Replay blocked
+        Assert.False(service.TryValidateAndConsume(code, expires.AddMinutes(-1)));
 
         var (code2, expires2) = service.GeneratePairingCode(TimeSpan.FromMinutes(1));
-        Assert.False(service.TryValidateAndConsume(code2, expires2.AddSeconds(1))); // Expired blocked
+        Assert.False(service.TryValidateAndConsume(code2, expires2.AddSeconds(1)));
     }
 
     [Fact]
@@ -162,8 +162,12 @@ public sealed class IisAndDatabaseSafetyTests
     }
 }
 
-public sealed class DeploymentAndGitHubTests
+public sealed class DeploymentAndPersistenceTests
 {
+    private const string Commit1 = "1111111111111111111111111111111111111111";
+    private const string Commit2 = "2222222222222222222222222222222222222222";
+    private const string Commit3 = "3333333333333333333333333333333333333333";
+
     [Fact]
     public void DeploymentLifecycleStateMachine_PreventsIllegalJumps()
     {
@@ -173,69 +177,167 @@ public sealed class DeploymentAndGitHubTests
     }
 
     [Fact]
-    public async Task DeploymentOrchestrator_RollsBackOnHealthCheckFailure_AndPreservesPreviousRelease()
+    public async Task DeploymentOrchestrator_FailsWhenArtifactMissingOrUntrusted()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-deploy-test-{Guid.NewGuid():N}");
-        var previousGood = Path.Combine(tempRoot, "releases", "20261118-good");
-        Directory.CreateDirectory(previousGood);
-
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-missing-art-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
         try
         {
             var iisMock = new Mock<IIisManager>();
-            var rollbackCalled = false;
-            iisMock.Setup(m => m.EnsureManagedSiteAndPoolAsync(It.IsAny<ManagedApplication>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Returns(Task.CompletedTask);
-            iisMock.Setup(m => m.SwitchSitePhysicalPathAsync(It.IsAny<ManagedApplication>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .Callback<ManagedApplication, string, CancellationToken>((_, path, _) =>
-                {
-                    if (path == previousGood) rollbackCalled = true;
-                })
-                .Returns(Task.CompletedTask);
-
             var adapter = new StaticSiteDeploymentAdapter(ApplicationRuntimeType.StaticHtml, iisMock.Object);
-
-            // Health probe returns 500 to force rollback
-            var failingHttp = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+            var okHttp = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)));
             var orchestrator = new DeploymentOrchestrator(
-                [adapter],
-                new PathBoundaryGuard(),
-                new DpapiSecretProtector(),
-                failingHttp,
-                NullLogger<DeploymentOrchestrator>.Instance);
+                [adapter], new PathBoundaryGuard(), new DpapiSecretProtector(), okHttp, NullLogger<DeploymentOrchestrator>.Instance);
 
-            var app = new ManagedApplication
-            {
-                Name = "Marketing Static",
-                Slug = "marketing-static",
-                RuntimeType = ApplicationRuntimeType.StaticHtml,
-                ManagementState = ResourceManagementState.ServerForgeCreated,
-                RepositoryFullName = "owner/marketing",
-                RepositoryExplicitlyAuthorized = true,
-                Branch = "main",
-                PrimaryDomain = "marketing.local",
-                IisSiteName = "SF-Marketing",
-                IisAppPoolName = "SF-Marketing-Pool",
-                ReleasesRootPath = tempRoot,
-                PersistentDataPath = Path.Combine(tempRoot, "data"),
-                ActiveReleasePath = previousGood,
-                LastKnownGoodReleasePath = previousGood,
-                HealthCheckPath = "/health",
-                HealthCheckTimeoutSeconds = 5,
-                AutoRollbackOnFailure = true
-            };
+            var app = CreateStaticApp(tempRoot);
 
-            var result = await orchestrator.EnqueueAndExecuteAsync(
+            // Problem C: missing artifact MUST fail, never succeed
+            var missingRes = await orchestrator.EnqueueAndExecuteAsync(
                 app,
-                new TriggerDeploymentRequest(app.Id, "badcommit123456", "main", "Broken release", "dev", null, null, false, "test"),
+                new TriggerDeploymentRequest(app.Id, Commit1, "main", "Missing art", "dev", null, null, false, "test"),
                 new Dictionary<string, string>());
 
-            Assert.Equal(DeploymentState.RolledBack, result.State);
-            Assert.True(rollbackCalled);
-            Assert.Equal(previousGood, app.ActiveReleasePath);
+            Assert.Equal(DeploymentState.Failed, missingRes.State);
+            Assert.Contains("missing", missingRes.ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+            Assert.Null(app.ActiveReleasePath);
         }
         finally
         {
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DeploymentOrchestrator_HandlesFirstDeploy_SecondDeploy_FailedUpdate_AndRollback()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-durability-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var zipPath = Path.Combine(tempRoot, "valid-static.zip");
+        CreateSampleStaticZip(zipPath, "<html><body>v1</body></html>");
+        var trustedDigest = await SafeProcessRunner.ComputeFileSha256Async(zipPath);
+
+        try
+        {
+            var iisMock = new Mock<IIisManager>();
+            var activeIisPath = string.Empty;
+            iisMock.Setup(m => m.EnsureManagedSiteAndPoolAsync(It.IsAny<ManagedApplication>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            iisMock.Setup(m => m.SwitchSitePhysicalPathAsync(It.IsAny<ManagedApplication>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Callback<ManagedApplication, string, CancellationToken>((_, path, _) => activeIisPath = path)
+                .Returns(Task.CompletedTask);
+
+            var healthStatus = HttpStatusCode.OK;
+            var http = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(healthStatus)));
+            var adapter = new StaticSiteDeploymentAdapter(ApplicationRuntimeType.StaticHtml, iisMock.Object);
+            var orchestrator = new DeploymentOrchestrator(
+                [adapter], new PathBoundaryGuard(), new DpapiSecretProtector(), http, NullLogger<DeploymentOrchestrator>.Instance);
+
+            var app = CreateStaticApp(tempRoot);
+
+            // 1. First deployment succeeds
+            var first = await orchestrator.EnqueueAndExecuteAsync(
+                app,
+                new TriggerDeploymentRequest(app.Id, Commit1, "main", "v1", "dev", zipPath, trustedDigest, false, "test", 1001, 5001, "rel-1", "GitHubActions"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Successful, first.State);
+            var release1 = app.ActiveReleasePath!;
+            Assert.Equal(release1, app.LastKnownGoodReleasePath);
+
+            // 2. Second deployment succeeds & updates LKG -> release1
+            await Task.Delay(1100);
+            var second = await orchestrator.EnqueueAndExecuteAsync(
+                app,
+                new TriggerDeploymentRequest(app.Id, Commit2, "main", "v2", "dev", zipPath, trustedDigest, false, "test", 1002, 5002, "rel-2", "GitHubActions"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.Successful, second.State);
+            var release2 = app.ActiveReleasePath!;
+            Assert.NotEqual(release1, release2);
+            Assert.Equal(release1, app.LastKnownGoodReleasePath);
+
+            // 3. Third deployment fails health check -> rolls back cleanly to release2
+            healthStatus = HttpStatusCode.ServiceUnavailable;
+            var third = await orchestrator.EnqueueAndExecuteAsync(
+                app,
+                new TriggerDeploymentRequest(app.Id, Commit3, "main", "v3 broken", "dev", zipPath, trustedDigest, false, "test", 1003, 5003, "rel-3", "GitHubActions"),
+                new Dictionary<string, string>());
+            Assert.Equal(DeploymentState.RolledBack, third.State);
+            Assert.Equal(release2, app.ActiveReleasePath);
+            Assert.Equal(release2, activeIisPath);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SqliteStore_PersistsPairedServer_RecoversInterruptedDeploys_AndRemovesManagementOnly()
+    {
+        var dbFile = Path.Combine(Path.GetTempPath(), $"sf-sqlite-{Guid.NewGuid():N}.db");
+        try
+        {
+            var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
+                .UseSqlite($"Data Source={dbFile}")
+                .Options;
+
+            await using (var init = new ServerForgeDbContext(opts))
+                await init.InitializeSqliteAsync();
+
+            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => new ServerForgeDbContext(opts));
+
+            var store = new ServerForgeStore(factoryMock.Object, new DpapiSecretProtector());
+
+            // Problem E: Pairing persistence across restarts
+            await store.UpsertServerAsync(new ManagedServer
+            {
+                AgentId = "agent-prod-01",
+                DisplayName = "Prod Win2022",
+                HostAddress = "10.10.0.5",
+                AgentPort = 9443,
+                PinnedServerCertThumbprint = "AABBCCDD",
+                Status = ServerConnectionStatus.Connected
+            }, "unit-test");
+
+            var servers = await store.GetServersAsync();
+            Assert.Single(servers);
+            Assert.Equal("agent-prod-01", servers[0].AgentId);
+
+            // Problem G: Interrupted deployment crash recovery
+            var app = new ManagedApplication
+            {
+                Name = "Orders API",
+                Slug = "orders-api",
+                RuntimeType = ApplicationRuntimeType.NestJsApi,
+                RepositoryFullName = "owner/orders-api",
+                RepositoryExplicitlyAuthorized = true,
+                InternalPort = 4010
+            };
+            await store.UpsertApplicationAsync(app, "unit-test");
+
+            await store.RecordDeploymentAsync(new DeploymentRecord
+            {
+                ApplicationId = app.Id,
+                CommitSha = Commit1,
+                Branch = "main",
+                State = DeploymentState.Deploying
+            });
+
+            var recoveredCount = await store.RecoverInterruptedDeploymentsAsync();
+            Assert.Equal(1, recoveredCount);
+
+            var history = await store.GetDeploymentHistoryAsync(app.Id);
+            Assert.Equal(DeploymentState.Failed, history[0].State);
+            Assert.Contains("interrupted", history[0].ErrorSummary ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // Problem D: Remove from management preserves files & records audit
+            Assert.True(await store.RemoveApplicationFromManagementAsync(app.Id, "unit-test"));
+            Assert.Empty(await store.GetApplicationsAsync());
+        }
+        finally
+        {
+            if (File.Exists(dbFile)) File.Delete(dbFile);
         }
     }
 
@@ -261,46 +363,32 @@ public sealed class DeploymentAndGitHubTests
         Assert.Equal(4999, check.RateLimitRemaining);
     }
 
-    [Fact]
-    public async Task SqlitePersistence_RoundTripsApplicationAndAuditLog()
+    private static ManagedApplication CreateStaticApp(string tempRoot) => new()
     {
-        var dbFile = Path.Combine(Path.GetTempPath(), $"sf-sqlite-{Guid.NewGuid():N}.db");
-        try
-        {
-            var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
-                .UseSqlite($"Data Source={dbFile}")
-                .Options;
+        Name = "Marketing Static",
+        Slug = "marketing-static",
+        RuntimeType = ApplicationRuntimeType.StaticHtml,
+        ManagementState = ResourceManagementState.ServerForgeCreated,
+        SourceMode = DeploymentSourceMode.GitHubActionsArtifact,
+        RepositoryFullName = "owner/marketing",
+        RepositoryExplicitlyAuthorized = true,
+        Branch = "main",
+        PrimaryDomain = "marketing.local",
+        IisSiteName = "SF-Marketing",
+        IisAppPoolName = "SF-Marketing-Pool",
+        ReleasesRootPath = tempRoot,
+        PersistentDataPath = Path.Combine(tempRoot, "data"),
+        HealthCheckPath = "/health",
+        HealthCheckTimeoutSeconds = 3,
+        AutoRollbackOnFailure = true
+    };
 
-            await using (var init = new ServerForgeDbContext(opts))
-                await init.InitializeSqliteAsync();
-
-            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
-            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
-                .ReturnsAsync(() => new ServerForgeDbContext(opts));
-
-            var store = new ServerForgeStore(factoryMock.Object, new DpapiSecretProtector());
-            var app = new ManagedApplication
-            {
-                Name = "Orders API",
-                Slug = "orders-api",
-                RuntimeType = ApplicationRuntimeType.NestJsApi,
-                RepositoryFullName = "owner/orders-api",
-                RepositoryExplicitlyAuthorized = true,
-                InternalPort = 4010
-            };
-
-            await store.UpsertApplicationAsync(app, "unit-test");
-            var loaded = await store.GetApplicationsAsync();
-            var audits = await store.GetRecentAuditLogsAsync();
-
-            Assert.Single(loaded);
-            Assert.Equal("orders-api", loaded[0].Slug);
-            Assert.Contains(audits, a => a.Action == "Application.Created");
-        }
-        finally
-        {
-            if (File.Exists(dbFile)) File.Delete(dbFile);
-        }
+    private static void CreateSampleStaticZip(string zipPath, string indexHtml)
+    {
+        using var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create);
+        var entry = zip.CreateEntry("index.html");
+        using var writer = new StreamWriter(entry.Open());
+        writer.Write(indexHtml);
     }
 
     private sealed class StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler

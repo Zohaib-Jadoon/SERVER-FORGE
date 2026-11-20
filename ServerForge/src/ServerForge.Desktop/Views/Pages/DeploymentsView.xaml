@@ -1,0 +1,28 @@
+<UserControl x:Class="ServerForge.Desktop.Views.Pages.DeploymentsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel>
+        <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Left">
+                    <TextBlock Text="12-State Deployment Lifecycle &amp; Safe Rollback" FontSize="15" FontWeight="SemiBold" />
+                    <TextBlock Text="Application rollback restores previous healthy binaries/services without automatically reverting database schemas." FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+                <Button Content="Rollback Selected Application" Command="{Binding RollbackSelectedApplicationCommand}" DockPanel.Dock="Right" Padding="14,8" />
+            </DockPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardContainerStyle}">
+            <DataGrid ItemsSource="{Binding Deployments}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="320">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110" />
+                    <DataGridTextColumn Header="Commit SHA" Binding="{Binding CommitSha}" Width="140" />
+                    <DataGridTextColumn Header="Branch" Binding="{Binding Branch}" Width="90" />
+                    <DataGridTextColumn Header="Artifact SHA-256" Binding="{Binding ArtifactSha256}" Width="150" />
+                    <DataGridTextColumn Header="Triggered By" Binding="{Binding TriggeredBy}" Width="150" />
+                    <DataGridTextColumn Header="Error / Rollback Note" Binding="{Binding ErrorSummary}" Width="*" />
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+    </StackPanel>
+</UserControl>

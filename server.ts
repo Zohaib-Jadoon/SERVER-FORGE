@@ -27,16 +27,19 @@ function classifyCategory(relPath: string): string {
   return 'Solution & Docs';
 }
 
-function walkSolution(dir: string, base: string, acc: SolutionFileEntry[]): void {
+const ROOT_GITHUB_WORKFLOWS_DIR = path.resolve(ROOT_DIR, '.github', 'workflows');
+
+function walkSolution(dir: string, base: string, acc: SolutionFileEntry[], prefix = ''): void {
   if (!fs.existsSync(dir)) return;
   const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     if (entry.name === 'bin' || entry.name === 'obj' || entry.name === 'artifacts') continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      walkSolution(full, base, acc);
+      walkSolution(full, base, acc, prefix);
     } else if (entry.isFile()) {
-      const rel = path.relative(base, full).split(path.sep).join('/');
+      const relRaw = path.relative(base, full).split(path.sep).join('/');
+      const rel = prefix ? `${prefix}/${relRaw}` : relRaw;
       const stat = fs.statSync(full);
       const raw = fs.readFileSync(full, 'utf8');
       const lines = raw.length === 0 ? 0 : raw.split(/\r?\n/).length;
@@ -57,6 +60,7 @@ async function startServer() {
 
   app.get('/api/solution/files', (_req, res) => {
     const files: SolutionFileEntry[] = [];
+    walkSolution(ROOT_GITHUB_WORKFLOWS_DIR, ROOT_GITHUB_WORKFLOWS_DIR, files, '.github/workflows');
     walkSolution(SOLUTION_DIR, SOLUTION_DIR, files);
     res.json({
       solutionRoot: 'ServerForge',
@@ -76,8 +80,23 @@ async function startServer() {
       return;
     }
 
-    const resolved = path.resolve(SOLUTION_DIR, requested);
-    if (!resolved.startsWith(SOLUTION_DIR + path.sep) || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    let resolved: string;
+    if (requested.startsWith('.github/workflows/')) {
+      const workflowRel = requested.slice('.github/workflows/'.length);
+      resolved = path.resolve(ROOT_GITHUB_WORKFLOWS_DIR, workflowRel);
+      if (!resolved.startsWith(ROOT_GITHUB_WORKFLOWS_DIR + path.sep)) {
+        res.status(400).json({ error: 'Invalid workflow file path.' });
+        return;
+      }
+    } else {
+      resolved = path.resolve(SOLUTION_DIR, requested);
+      if (!resolved.startsWith(SOLUTION_DIR + path.sep)) {
+        res.status(404).json({ error: 'File not found inside ServerForge solution.' });
+        return;
+      }
+    }
+
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
       res.status(404).json({ error: 'File not found inside ServerForge solution.' });
       return;
     }
@@ -99,7 +118,10 @@ async function startServer() {
     }
     res.setHeader('Content-Type', 'application/gzip');
     res.setHeader('Content-Disposition', 'attachment; filename="ServerForge-Windows-NET10-Solution.tar.gz"');
-    const tar = spawn('tar', ['-czf', '-', '-C', ROOT_DIR, 'ServerForge']);
+    const archiveItems = fs.existsSync(ROOT_GITHUB_WORKFLOWS_DIR)
+      ? ['.github', 'ServerForge']
+      : ['ServerForge'];
+    const tar = spawn('tar', ['-czf', '-', '-C', ROOT_DIR, ...archiveItems]);
     tar.stdout.pipe(res);
     tar.on('error', () => {
       if (!res.headersSent) res.status(500).end('Archive generation failed.');

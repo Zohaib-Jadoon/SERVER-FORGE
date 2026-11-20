@@ -6,7 +6,7 @@ namespace ServerForge.AgentTests;
 public sealed class AgentIdentityAndPairingTests
 {
     [Fact]
-    public void AgentIdentityStore_PersistsCertificateAndCompletesPairingState()
+    public void AgentIdentityStore_PersistsCertificate_CompletesPairing_AndRotatesDesktopCert()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"sf-agent-test-{Guid.NewGuid():N}");
         try
@@ -22,10 +22,19 @@ public sealed class AgentIdentityAndPairingTests
             Assert.True(store.State.IsPaired);
             Assert.Equal("AABBCCDDEEFF", store.State.PairedDesktopCertThumbprint);
 
+            // Certificate rotation preserves previous thumbprint and updates active pinned identity
+            var rotated = store.RotateDesktopCertificate("desktop-01", "11:22:33:44:55:66");
+            Assert.Equal("112233445566", rotated);
+            Assert.Equal("AABBCCDDEEFF", store.State.PreviousDesktopCertThumbprint);
+
+            // Reject rotation from wrong Desktop instance ID
+            Assert.Throws<UnauthorizedAccessException>(() =>
+                store.RotateDesktopCertificate("rogue-desktop", "99:88:77"));
+
             // Re-open from disk and confirm persistence across restarts
             var reloaded = new AgentIdentityStore(opts);
             Assert.True(reloaded.State.IsPaired);
-            Assert.Equal("desktop-01", reloaded.State.PairedDesktopInstanceId);
+            Assert.Equal("112233445566", reloaded.State.PairedDesktopCertThumbprint);
         }
         finally
         {

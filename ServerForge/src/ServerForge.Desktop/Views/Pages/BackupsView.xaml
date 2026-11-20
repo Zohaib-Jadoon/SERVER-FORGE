@@ -1,0 +1,38 @@
+<UserControl x:Class="ServerForge.Desktop.Views.Pages.BackupsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel>
+        <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+            <StackPanel>
+                <TextBlock Text="Schedule Database or Application Configuration Backup" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="1.5*" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0" Text="{Binding NewBackupTarget, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" ToolTip="Database or App Name" />
+                    <TextBox Grid.Column="2" Text="{Binding NewBackupDestination, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    <TextBox Grid.Column="4" Text="{Binding NewBackupCron, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    <Button Grid.Column="6" Content="Save Schedule" Command="{Binding SaveBackupJobCommand}" Style="{StaticResource PrimaryButtonStyle}" />
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardContainerStyle}">
+            <DataGrid ItemsSource="{Binding BackupJobs}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="260">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Target" Binding="{Binding TargetName}" Width="1.5*" />
+                    <DataGridTextColumn Header="Type" Binding="{Binding BackupType}" Width="120" />
+                    <DataGridTextColumn Header="Cron" Binding="{Binding ScheduleCron}" Width="110" />
+                    <DataGridTextColumn Header="Retention (Days)" Binding="{Binding RetentionDays}" Width="115" />
+                    <DataGridTextColumn Header="Destination" Binding="{Binding DestinationPath}" Width="2*" />
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+    </StackPanel>
+</UserControl>

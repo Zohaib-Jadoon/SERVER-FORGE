@@ -10,7 +10,7 @@ namespace ServerForge.GitHub.Client;
 
 /// <summary>
 /// Typed GitHub REST API client supporting Fine-Grained PATs, conditional ETag polling,
-/// repository search, commit inspection, and GitHub Actions artifact download + SHA-256 verification.
+/// repository search, commit inspection, and provenance-verified GitHub Actions artifact downloads.
 /// </summary>
 public sealed class GitHubApiClient : IGitHubClient
 {
@@ -152,9 +152,7 @@ public sealed class GitHubApiClient : IGitHubClient
         var newETag = resp.Headers.ETag?.ToString() ?? lastETag;
 
         if (resp.StatusCode == HttpStatusCode.NotModified)
-        {
             return new GitHubHeadCheckResult(false, null, null, null, newETag, remaining);
-        }
 
         resp.EnsureSuccessStatusCode();
         var item = await resp.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct).ConfigureAwait(false);
@@ -169,20 +167,22 @@ public sealed class GitHubApiClient : IGitHubClient
     public async Task<GitHubArtifactDownloadResult> DownloadVerifiedWorkflowArtifactAsync(
         string personalAccessToken,
         string repositoryFullName,
+        string branch,
         string commitSha,
+        string? expectedWorkflowFileName,
         string destinationZipPath,
         CancellationToken ct)
     {
-        // Locate completed successful workflow run for exact commit SHA
+        // 1. Locate completed successful workflow run matching exact commit SHA, branch, and workflow file
         using var runsReq = CreateRequest(
             HttpMethod.Get,
-            $"repos/{repositoryFullName}/actions/runs?head_sha={Uri.EscapeDataString(commitSha)}&status=completed&per_page=10",
+            $"repos/{repositoryFullName}/actions/runs?head_sha={Uri.EscapeDataString(commitSha)}&branch={Uri.EscapeDataString(branch)}&status=completed&per_page=20",
             personalAccessToken);
 
         using var runsResp = await _http.SendAsync(runsReq, ct).ConfigureAwait(false);
         if (!runsResp.IsSuccessStatusCode)
         {
-            return new GitHubArtifactDownloadResult(false, null, null, null,
+            return new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null,
                 $"Unable to query GitHub Actions workflow runs (HTTP {(int)runsResp.StatusCode}).");
         }
 
@@ -193,20 +193,32 @@ public sealed class GitHubApiClient : IGitHubClient
             foreach (var run in runs.EnumerateArray())
             {
                 var conclusion = run.TryGetProperty("conclusion", out var c) ? c.GetString() : null;
-                if (string.Equals(conclusion, "success", StringComparison.OrdinalIgnoreCase))
+                var runSha = run.TryGetProperty("head_sha", out var s) ? s.GetString() : null;
+                var runBranch = run.TryGetProperty("head_branch", out var b) ? b.GetString() : null;
+                var runPath = run.TryGetProperty("path", out var p) ? p.GetString() : null;
+
+                if (!string.Equals(conclusion, "success", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.Equals(runSha, commitSha, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.Equals(runBranch, branch, StringComparison.Ordinal)) continue;
+                if (!string.IsNullOrWhiteSpace(expectedWorkflowFileName) &&
+                    !string.IsNullOrWhiteSpace(runPath) &&
+                    !runPath.EndsWith(expectedWorkflowFileName, StringComparison.OrdinalIgnoreCase))
                 {
-                    matchingRunId = run.GetProperty("id").GetInt64();
-                    break;
+                    continue;
                 }
+
+                matchingRunId = run.GetProperty("id").GetInt64();
+                break;
             }
         }
 
         if (matchingRunId is null)
         {
-            return new GitHubArtifactDownloadResult(false, null, null, null,
-                $"No completed successful GitHub Actions workflow run found yet for commit {commitSha[..Math.Min(7, commitSha.Length)]}.");
+            return new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null,
+                $"No completed successful GitHub Actions workflow run verified for {repositoryFullName}@{branch} ({commitSha[..Math.Min(7, commitSha.Length)]}).");
         }
 
+        // 2. Inspect workflow artifacts for identity, non-empty size, and GitHub-reported SHA-256 digest
         using var artReq = CreateRequest(
             HttpMethod.Get,
             $"repos/{repositoryFullName}/actions/runs/{matchingRunId}/artifacts",
@@ -217,25 +229,41 @@ public sealed class GitHubApiClient : IGitHubClient
         var artJson = await artResp.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct).ConfigureAwait(false);
 
         string? downloadUrl = null;
+        long? artifactId = null;
+        string? artifactName = null;
+        string? trustedDigest = null;
+
         if (artJson.TryGetProperty("artifacts", out var artifacts) && artifacts.ValueKind == JsonValueKind.Array)
         {
             foreach (var art in artifacts.EnumerateArray())
             {
                 var expired = art.TryGetProperty("expired", out var ex) && ex.GetBoolean();
-                if (!expired)
+                var sizeBytes = art.TryGetProperty("size_in_bytes", out var sz) ? sz.GetInt64() : 0;
+                if (expired || sizeBytes <= 0) continue;
+
+                artifactId = art.GetProperty("id").GetInt64();
+                artifactName = art.TryGetProperty("name", out var nm) ? nm.GetString() : $"artifact-{artifactId}";
+                downloadUrl = art.GetProperty("archive_download_url").GetString();
+
+                // GitHub Actions Artifacts REST API exposes `digest: "sha256:<hex>"`
+                if (art.TryGetProperty("digest", out var dg) && dg.ValueKind == JsonValueKind.String)
                 {
-                    downloadUrl = art.GetProperty("archive_download_url").GetString();
-                    break;
+                    var rawDigest = dg.GetString() ?? "";
+                    trustedDigest = rawDigest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                        ? rawDigest[7..].Trim().ToLowerInvariant()
+                        : rawDigest.Trim().ToLowerInvariant();
                 }
+                break;
             }
         }
 
-        if (string.IsNullOrWhiteSpace(downloadUrl))
+        if (string.IsNullOrWhiteSpace(downloadUrl) || artifactId is null)
         {
-            return new GitHubArtifactDownloadResult(false, null, null, matchingRunId,
-                $"Workflow run {matchingRunId} succeeded but produced no non-expired deployment artifact.");
+            return new GitHubArtifactDownloadResult(false, null, null, null, matchingRunId, null, null, null,
+                $"Workflow run {matchingRunId} succeeded but produced no non-expired, non-empty deployment artifact.");
         }
 
+        // 3. Download archive and verify computed SHA-256 against GitHub API's trusted digest
         Directory.CreateDirectory(Path.GetDirectoryName(destinationZipPath)!);
         using var dlReq = CreateRequest(HttpMethod.Get, downloadUrl, personalAccessToken);
         using var dlResp = await _http.SendAsync(dlReq, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
@@ -246,11 +274,44 @@ public sealed class GitHubApiClient : IGitHubClient
             await dlResp.Content.CopyToAsync(fs, ct).ConfigureAwait(false);
         }
 
-        var sha256 = await SafeProcessRunner.ComputeFileSha256Async(destinationZipPath, ct).ConfigureAwait(false);
-        _logger.LogInformation("Downloaded GitHub Actions artifact for {Repo}@{Sha} (Run {RunId}, SHA-256 {Hash})",
-            repositoryFullName, commitSha[..Math.Min(7, commitSha.Length)], matchingRunId, sha256);
+        var fileInfo = new FileInfo(destinationZipPath);
+        if (!fileInfo.Exists || fileInfo.Length == 0)
+        {
+            return new GitHubArtifactDownloadResult(false, null, null, trustedDigest, matchingRunId, artifactId, artifactName, null,
+                "Downloaded artifact archive was empty (0 bytes).");
+        }
 
-        return new GitHubArtifactDownloadResult(true, destinationZipPath, sha256, matchingRunId, null);
+        var computedSha256 = await SafeProcessRunner.ComputeFileSha256Async(destinationZipPath, ct).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(trustedDigest))
+        {
+            // Refuse unsigned/unverified artifact without trusted provenance digest
+            File.Delete(destinationZipPath);
+            return new GitHubArtifactDownloadResult(false, null, computedSha256, null, matchingRunId, artifactId, artifactName, null,
+                $"GitHub Actions artifact '{artifactName}' (ID {artifactId}) lacked a server-reported SHA-256 digest. Refusing untrusted artifact.");
+        }
+
+        if (!computedSha256.Equals(trustedDigest, StringComparison.OrdinalIgnoreCase))
+        {
+            File.Delete(destinationZipPath);
+            return new GitHubArtifactDownloadResult(false, null, computedSha256, trustedDigest, matchingRunId, artifactId, artifactName, null,
+                $"Artifact SHA-256 integrity mismatch! GitHub API digest={trustedDigest}, downloaded file={computedSha256}.");
+        }
+
+        _logger.LogInformation(
+            "Verified GitHub Actions artifact '{Name}' (ID {ArtId}, Run {RunId}) for {Repo}@{Sha}: SHA-256 matched GitHub API digest {Hash}",
+            artifactName, artifactId, matchingRunId, repositoryFullName, commitSha[..Math.Min(7, commitSha.Length)], computedSha256[..12]);
+
+        return new GitHubArtifactDownloadResult(
+            Found: true,
+            LocalZipPath: destinationZipPath,
+            ComputedSha256: computedSha256,
+            TrustedApiDigestSha256: trustedDigest,
+            WorkflowRunId: matchingRunId,
+            ArtifactId: artifactId,
+            ArtifactName: artifactName,
+            TrustSource: $"GitHubActionsRun:{matchingRunId}/Artifact:{artifactId}",
+            ErrorMessage: null);
     }
 
     private static HttpRequestMessage CreateRequest(HttpMethod method, string relativeOrAbsoluteUri, string pat)

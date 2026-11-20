@@ -1,5 +1,7 @@
 ; Inno Setup Script — ServerForge Desktop (Native WPF .NET 10 Self-Contained win-x64)
 ; Produces: ServerForge-Desktop-Setup.exe
+; SAFETY: Scopes CloseApplicationsFilter strictly to ServerForge.Desktop.exe so unrelated apps are never closed.
+; UPGRADE: Preserves %LOCALAPPDATA%\ServerForge (SQLite metadata, DPAPI certs & local settings).
 
 #define MyAppName "ServerForge Desktop"
 #define MyAppVersion "1.0.0"
@@ -31,7 +33,9 @@ VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=ServerForge Desktop — Native Windows Self-Hosted Deployment Control Center
 CloseApplications=yes
+CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
+AllowNoIcons=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -51,5 +55,16 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Preserve %LOCALAPPDATA%\ServerForge (SQLite metadata, DPAPI certs & local settings) across upgrades and uninstalls
+; Preserve %LOCALAPPDATA%\ServerForge (SQLite metadata, DPAPI certs & paired server records) across upgrades and uninstalls
 Type: dirifempty; Name: "{app}"
+
+[Code]
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if not IsWin64 then
+  begin
+    MsgBox('ServerForge Desktop requires 64-bit Windows 10 (2004+) or Windows 11.', mbCriticalError, MB_OK);
+    Result := False;
+  end;
+end;

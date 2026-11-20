@@ -3,11 +3,19 @@ using ServerForge.Core.Entities;
 
 namespace ServerForge.Infrastructure.Persistence;
 
+public sealed class VaultSecretRecord
+{
+    public string Key { get; set; } = string.Empty;
+    public string ProtectedValue { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public sealed class ServerForgeDbContext : DbContext
 {
     public ServerForgeDbContext(DbContextOptions<ServerForgeDbContext> options) : base(options) { }
 
     public DbSet<LocalAdminProfile> AdminProfiles => Set<LocalAdminProfile>();
+    public DbSet<VaultSecretRecord> VaultSecrets => Set<VaultSecretRecord>();
     public DbSet<ProjectGroup> Projects => Set<ProjectGroup>();
     public DbSet<ManagedServer> Servers => Set<ManagedServer>();
     public DbSet<ManagedApplication> Applications => Set<ManagedApplication>();
@@ -24,6 +32,11 @@ public sealed class ServerForgeDbContext : DbContext
         {
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.Username).IsUnique();
+        });
+
+        modelBuilder.Entity<VaultSecretRecord>(e =>
+        {
+            e.HasKey(x => x.Key);
         });
 
         modelBuilder.Entity<ProjectGroup>(e =>
@@ -49,6 +62,7 @@ public sealed class ServerForgeDbContext : DbContext
         {
             e.HasKey(x => x.Id);
             e.HasIndex(x => new { x.ApplicationId, x.QueuedAtUtc });
+            e.HasIndex(x => new { x.ApplicationId, x.CommitSha });
         });
 
         modelBuilder.Entity<EnvironmentVariableRecord>(e =>
@@ -83,7 +97,6 @@ public sealed class ServerForgeDbContext : DbContext
     public async Task InitializeSqliteAsync(CancellationToken ct = default)
     {
         await Database.EnsureCreatedAsync(ct).ConfigureAwait(false);
-        // Enable Write-Ahead Logging for concurrent Desktop/Agent read/write reliability
         await Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;", ct).ConfigureAwait(false);
     }
 }

@@ -1,0 +1,30 @@
+<UserControl x:Class="ServerForge.Desktop.Views.Pages.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel>
+        <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+            <StackPanel>
+                <TextBlock Text="GitHub Fine-Grained Personal Access Token (Windows DPAPI Vault)" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <DockPanel>
+                    <Button Content="Validate &amp; Encrypt PAT" Command="{Binding SaveGitHubPatInSettingsCommand}" DockPanel.Dock="Right" Margin="10,0,0,0" Style="{StaticResource PrimaryButtonStyle}" />
+                    <TextBox Text="{Binding SettingsGitHubPat, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                </DockPanel>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+            <StackPanel>
+                <TextBlock Text="Appearance &amp; Windows 11 Fluent Theme" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <Button Content="Switch Dark / Light Theme (Ctrl+T)" Command="{Binding ToggleThemeCommand}" HorizontalAlignment="Left" Padding="14,8" />
+            </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardContainerStyle}">
+            <StackPanel>
+                <TextBlock Text="Explicitly Separated Demo Mode" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,6" />
+                <TextBlock Text="Live Production Mode never renders sample deployments. Enable Demo Mode only for UI previewing without affecting SQLite or paired Windows Servers." FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10" />
+                <Button Content="Toggle Isolated Demo Mode" Command="{Binding ToggleDemoModeCommand}" HorizontalAlignment="Left" Padding="14,8" />
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

@@ -1,0 +1,101 @@
+name: Build & Package ServerForge (Windows .NET 10 + Inno Setup)
+
+on:
+  push:
+    branches: [ main, develop, 'feature/**', 'fix/**' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-test-package-windows:
+    name: Windows x64 Build, Test & Installers
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 LTS SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Verify .NET SDK version
+        shell: pwsh
+        run: |
+          dotnet --info
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Restore, Build, Test & Publish Self-Contained x64 Binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./ServerForge/scripts/build-windows.ps1 -Configuration Release -CollectTestResults
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "build-windows.ps1 failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload xUnit Test Results (.trx)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverforge-windows-test-results
+          path: ServerForge/artifacts/test-results/**/*.trx
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to install Inno Setup via Chocolatey (exit code $LASTEXITCODE)."
+            exit $LASTEXITCODE
+          }
+
+      - name: Compile Windows Installers & Verify Checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./ServerForge/scripts/build-installers.ps1 -SkipBuild
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "build-installers.ps1 failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify Installer Artifacts Exist & Are Non-Empty
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'ServerForge/artifacts/installers/ServerForge-Desktop-Setup.exe',
+            'ServerForge/artifacts/installers/ServerForge-Agent-Setup.exe',
+            'ServerForge/artifacts/installers/SHA256SUMS.txt'
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) {
+              Write-Error "Required release artifact missing: $file"
+              exit 1
+            }
+            $len = (Get-Item $file).Length
+            if ($len -le 0) {
+              Write-Error "Required release artifact is empty: $file"
+              exit 1
+            }
+            Write-Host "Verified artifact: $file ($len bytes)"
+          }
+
+      - name: Upload Windows Installer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverforge-windows-x64-installers
+          path: |
+            ServerForge/artifacts/installers/ServerForge-Desktop-Setup.exe
+            ServerForge/artifacts/installers/ServerForge-Agent-Setup.exe
+            ServerForge/artifacts/installers/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30

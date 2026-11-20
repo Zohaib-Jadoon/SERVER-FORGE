@@ -35,6 +35,9 @@
                         <TextBlock Text="Local Admin Username" Margin="0,0,0,4" />
                         <TextBox Text="{Binding AdminUsername, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,0,0,10" />
 
+                        <TextBlock Text="Local Admin Password (min 8 characters, salted PBKDF2-SHA256)" Margin="0,0,0,4" />
+                        <PasswordBox x:Name="AdminPasswordBox" PasswordChanged="OnAdminPasswordChanged" Padding="8,6" Margin="0,0,0,10" />
+
                         <TextBlock Text="GitHub Fine-Grained PAT (encrypted locally via DPAPI)" Margin="0,0,0,4" />
                         <DockPanel Margin="0,0,0,6">
                             <Button Content="Validate Token" Command="{Binding ValidateGitHubTokenCommand}" DockPanel.Dock="Right" Margin="8,0,0,0" Style="{StaticResource PrimaryButtonStyle}" />

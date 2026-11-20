@@ -9,6 +9,6 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = viewModel;
-        Loaded += async (_, _) => await viewModel.RefreshLiveDataAsync();
+        Loaded += async (_, _) => await viewModel.RefreshLiveDataCommand.ExecuteAsync(null);
     }
 }

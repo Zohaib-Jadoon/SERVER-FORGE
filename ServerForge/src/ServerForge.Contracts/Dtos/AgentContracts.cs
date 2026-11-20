@@ -17,6 +17,92 @@ public sealed record PairingInitResponse(
     string AgentCertificateThumbprint,
     string? FailureReason);
 
+public sealed record RotateDesktopCertificateRequest(
+    string DesktopInstanceId,
+    string NewDesktopClientCertPem,
+    string Reason);
+
+public sealed record RotateDesktopCertificateResponse(
+    bool Rotated,
+    string NewPinnedThumbprint,
+    DateTimeOffset RotatedAtUtc,
+    string? FailureReason);
+
+public sealed record SyncGitHubCredentialRequest(
+    string PersonalAccessToken);
+
+public sealed record UpsertApplicationRequest(
+    Guid? Id,
+    Guid ProjectGroupId,
+    string Name,
+    string Slug,
+    ApplicationRuntimeType RuntimeType,
+    string RepositoryFullName,
+    string Branch,
+    string WorkingDirectory,
+    bool AutoDeployEnabled,
+    bool RepositoryExplicitlyAuthorized,
+    DeploymentSourceMode SourceMode,
+    string? GitHubWorkflowFileName,
+    string BuildCommand,
+    string StartCommand,
+    string RuntimeVersion,
+    int InternalPort,
+    string IisSiteName,
+    string IisAppPoolName,
+    string WindowsServiceName,
+    string PrimaryDomain,
+    string HealthCheckPath,
+    int HealthCheckTimeoutSeconds,
+    int RetainHealthyReleasesCount,
+    bool AutoRollbackOnFailure);
+
+public sealed record ToggleAutoDeployRequest(
+    bool Enabled,
+    bool RepositoryExplicitlyAuthorized);
+
+public sealed record EnvVarItemDto(
+    string Key,
+    string Value,
+    bool IsSecret,
+    bool IsRequired);
+
+public sealed record ConfigureEnvVarsRequest(
+    EnvironmentTier Tier,
+    IReadOnlyList<EnvVarItemDto> Variables);
+
+public sealed record ConfigureDomainRequest(
+    string Hostname,
+    int HttpPort,
+    int HttpsPort,
+    bool HttpsEnabled,
+    bool UseWinAcmeLetsEncrypt);
+
+public sealed record AdoptIisSiteRequest(
+    string SiteName,
+    bool OperatorReviewedDryRun,
+    string ConfirmationNote);
+
+public sealed record ReleaseSummaryDto(
+    string ReleaseId,
+    string FullPath,
+    bool IsActive,
+    bool IsLastKnownGood,
+    DateTimeOffset CreatedAtUtc,
+    long SizeBytes);
+
+public sealed record DatabaseConnectionTestRequest(
+    Guid DatabaseServerId,
+    string DisplayName,
+    DatabaseEngineType Engine,
+    string ConnectionString);
+
+public sealed record DatabaseBackupRequest(
+    DatabaseEngineType Engine,
+    string ConnectionString,
+    string DatabaseName,
+    string BackupDirectory);
+
 public sealed record ServerDiagnosticsSnapshot(
     string AgentId,
     string Hostname,
@@ -113,7 +199,11 @@ public sealed record TriggerDeploymentRequest(
     string? ArtifactDownloadUrl,
     string? ExpectedArtifactSha256,
     bool TriggeredAutomatically,
-    string RequestedBy);
+    string RequestedBy,
+    long? VerifiedWorkflowRunId = null,
+    long? VerifiedArtifactId = null,
+    string? VerifiedArtifactName = null,
+    string? ArtifactTrustSource = null);
 
 public sealed record DeploymentStatusUpdate(
     Guid DeploymentId,

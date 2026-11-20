@@ -1,0 +1,64 @@
+<UserControl x:Class="ServerForge.Desktop.Views.Pages.ApplicationsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel>
+        <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+            <StackPanel>
+                <TextBlock Text="Register Managed Application (9 Supported Windows Runtimes)" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12" />
+                <UniformGrid Columns="3" Margin="0,0,0,10">
+                    <StackPanel Margin="0,0,10,8">
+                        <TextBlock Text="Application Name" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding NewAppName, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="5,0,5,8">
+                        <TextBlock Text="Slug (lowercase-hyphen)" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding NewAppSlug, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="10,0,0,8">
+                        <TextBlock Text="Runtime Adapter" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <ComboBox ItemsSource="{Binding AvailableRuntimes}" SelectedItem="{Binding NewAppRuntime}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="0,0,10,8">
+                        <TextBlock Text="GitHub Repository (owner/repo)" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding NewAppRepo, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="5,0,5,8">
+                        <TextBlock Text="Deployment Branch" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding NewAppBranch, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="10,0,0,8">
+                        <TextBlock Text="Internal Loopback Port" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding NewAppPort, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                </UniformGrid>
+                <DockPanel>
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
+                        <CheckBox Content="Explicitly Authorize Repository" IsChecked="{Binding NewAppAuthorizeRepo}" Margin="0,0,16,0" />
+                        <CheckBox Content="Enable Autonomous Deploy-on-Push" IsChecked="{Binding NewAppAutoDeploy}" />
+                    </StackPanel>
+                    <Button Content="Register Application" Command="{Binding CreateApplicationCommand}" DockPanel.Dock="Right" Style="{StaticResource PrimaryButtonStyle}" />
+                </DockPanel>
+            </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardContainerStyle}">
+            <StackPanel>
+                <DockPanel Margin="0,0,0,10">
+                    <TextBlock Text="Managed Applications" FontSize="15" FontWeight="SemiBold" DockPanel.Dock="Left" VerticalAlignment="Center" />
+                    <Button Content="Remove From Management (Preserve Hosted Files)" Command="{Binding RemoveSelectedApplicationFromManagementCommand}" DockPanel.Dock="Right" Padding="12,6" />
+                </DockPanel>
+                <DataGrid ItemsSource="{Binding Applications}" SelectedItem="{Binding SelectedApplication, Mode=TwoWay}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="220">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="1.6*" />
+                        <DataGridTextColumn Header="Runtime" Binding="{Binding RuntimeType}" Width="1.2*" />
+                        <DataGridTextColumn Header="Repository" Binding="{Binding RepositoryFullName}" Width="1.8*" />
+                        <DataGridTextColumn Header="Branch" Binding="{Binding Branch}" Width="90" />
+                        <DataGridTextColumn Header="Port" Binding="{Binding InternalPort}" Width="75" />
+                        <DataGridTextColumn Header="Auto Deploy" Binding="{Binding AutoDeployEnabled}" Width="95" />
+                        <DataGridTextColumn Header="Management" Binding="{Binding ManagementState}" Width="1.3*" />
+                    </DataGrid.Columns>
+                </DataGrid>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

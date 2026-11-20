@@ -12,6 +12,7 @@ using ServerForge.Contracts.Dtos;
 using ServerForge.Contracts.Enums;
 using ServerForge.Core.Entities;
 using ServerForge.Core.Interfaces;
+using ServerForge.Core.Validation;
 using ServerForge.Databases.PostgreSql;
 using ServerForge.Databases.SqlServer;
 using ServerForge.Deployments.Adapters;
@@ -49,7 +50,6 @@ var identityStore = new AgentIdentityStore(agentOptions);
 var serverCert = identityStore.LoadOrCreateServerCertificate();
 var pairingService = new OneTimePairingTokenService();
 
-// Support CLI `--pair` ceremony invoked by Agent Installer or local Server Admin
 if (args.Contains("--generate-pairing-code", StringComparer.OrdinalIgnoreCase) || !identityStore.State.IsPaired)
 {
     var (code, expires) = pairingService.GeneratePairingCode(TimeSpan.FromMinutes(30));
@@ -61,7 +61,6 @@ if (args.Contains("--generate-pairing-code", StringComparer.OrdinalIgnoreCase) |
     Log.Information("Agent initial pairing code generated and written to {Path} (expires {Expires:O}).", pairingBannerPath, expires);
 }
 
-// Configure Kestrel with mandatory TLS 1.2/1.3 and client certificate support (never exposed publicly by default)
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
     var bindIp = IPAddress.TryParse(agentOptions.BindAddress, out var parsedIp) ? parsedIp : IPAddress.Loopback;
@@ -71,12 +70,11 @@ builder.WebHost.ConfigureKestrel(kestrel =>
         {
             httpsOptions.ServerCertificate = serverCert;
             httpsOptions.ClientCertificateMode = ClientCertificateMode.AllowCertificate;
-            httpsOptions.ClientCertificateValidation = (_, _, _) => true; // Validated fail-closed in auth handler
+            httpsOptions.ClientCertificateValidation = (_, _, _) => true; // Verified fail-closed below
         });
     });
 });
 
-// Fail-closed Mutual TLS authentication validating the pinned Desktop client certificate thumbprint
 builder.Services.AddAuthentication(CertificateAuthenticationDefaults.AuthenticationScheme)
     .AddCertificate(options =>
     {
@@ -109,7 +107,6 @@ builder.Services.AddAuthentication(CertificateAuthenticationDefaults.Authenticat
 
 builder.Services.AddAuthorization();
 
-// Register core services & SQLite local state
 var dbPath = Path.Combine(agentOptions.DataRoot, "agent-state.db");
 builder.Services.AddDbContextFactory<ServerForgeDbContext>(opts => opts.UseSqlite($"Data Source={dbPath}"));
 builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
@@ -118,6 +115,7 @@ builder.Services.AddSingleton(pairingService);
 builder.Services.AddSingleton<ISecretProtector>(_ => new DpapiSecretProtector(DataProtectionScope.LocalMachine));
 builder.Services.AddSingleton<IPathBoundaryGuard, PathBoundaryGuard>();
 builder.Services.AddSingleton<ServerForgeStore>();
+builder.Services.AddSingleton<IDeploymentStatePersistence>(sp => sp.GetRequiredService<ServerForgeStore>());
 builder.Services.AddSingleton<IIisManager, IisAdministrationService>();
 builder.Services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
 builder.Services.AddSingleton<AcmeCertificateService>();
@@ -125,9 +123,8 @@ builder.Services.AddSingleton<ISqlServerManager, SqlServerManagementService>();
 builder.Services.AddSingleton<IPostgreSqlManager, PostgreSqlManagementService>();
 builder.Services.AddHttpClient<IGitHubClient, GitHubApiClient>();
 builder.Services.AddHttpClient<IServerTelemetryProvider, WindowsTelemetryService>();
-builder.Services.AddHttpClient<DeploymentOrchestrator>();
+builder.Services.AddHttpClient("DeploymentHealth", c => c.Timeout = TimeSpan.FromSeconds(15));
 
-// Register all 9 application runtime deployment adapters
 builder.Services.AddSingleton<IAppDeploymentAdapter, NextJsDeploymentAdapter>();
 builder.Services.AddSingleton<IAppDeploymentAdapter>(sp =>
     new NodeServiceDeploymentAdapter(ApplicationRuntimeType.NestJsApi, sp.GetRequiredService<IIisManager>(), sp.GetRequiredService<IWindowsServiceManager>()));
@@ -142,7 +139,13 @@ builder.Services.AddSingleton<IAppDeploymentAdapter>(sp =>
 builder.Services.AddSingleton<IAppDeploymentAdapter, AspNetCoreDeploymentAdapter>();
 builder.Services.AddSingleton<IAppDeploymentAdapter, ClassicAspDeploymentAdapter>();
 builder.Services.AddSingleton<IAppDeploymentAdapter, PythonFastApiDeploymentAdapter>();
-builder.Services.AddSingleton<IDeploymentEngine, DeploymentOrchestrator>();
+builder.Services.AddSingleton<IDeploymentEngine>(sp => new DeploymentOrchestrator(
+    sp.GetServices<IAppDeploymentAdapter>(),
+    sp.GetRequiredService<IPathBoundaryGuard>(),
+    sp.GetRequiredService<ISecretProtector>(),
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient("DeploymentHealth"),
+    sp.GetRequiredService<ILogger<DeploymentOrchestrator>>(),
+    sp.GetRequiredService<IDeploymentStatePersistence>()));
 
 builder.Services.AddHostedService<GitHubAutoDeployWorker>();
 
@@ -153,12 +156,18 @@ using (var scope = app.Services.CreateScope())
     var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ServerForgeDbContext>>();
     await using var db = await factory.CreateDbContextAsync();
     await db.InitializeSqliteAsync();
+
+    // Crash recovery: cleanly fail any deployments interrupted by an Agent restart (Problem G)
+    var store = scope.ServiceProvider.GetRequiredService<ServerForgeStore>();
+    var recovered = await store.RecoverInterruptedDeploymentsAsync();
+    if (recovered > 0)
+        Log.Warning("Recovered {Count} interrupted deployment(s) after Agent restart; previous healthy releases preserved.", recovered);
 }
 
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Unauthenticated ONLY for initial one-time pairing ceremony while unpaired
+// Unauthenticated ONLY while unpaired via single-use expiring code
 app.MapPost("/api/v1/pairing/complete", (
     PairingInitRequest req,
     OneTimePairingTokenService tokens,
@@ -182,8 +191,268 @@ app.MapPost("/api/v1/pairing/complete", (
         FailureReason: null));
 });
 
-// All operational endpoints strictly require Mutual TLS client certificate authentication
+// ---- All operational routes require Mutual TLS authentication (Problem D) ----
 var api = app.MapGroup("/api/v1").RequireAuthorization();
+
+api.MapPost("/security/rotate-desktop-cert", async (
+    RotateDesktopCertificateRequest req,
+    AgentIdentityStore idStore,
+    ServerForgeStore sfStore,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    try
+    {
+        using var newCert = X509Certificate2.CreateFromPem(req.NewDesktopClientCertPem);
+        var thumbprint = idStore.RotateDesktopCertificate(req.DesktopInstanceId, newCert.Thumbprint);
+        await sfStore.RecordAuditAsync(new AuditLogRecord
+        {
+            Actor = user.Identity?.Name ?? "DesktopAdmin",
+            Action = "Security.DesktopCertRotated",
+            TargetResource = req.DesktopInstanceId,
+            Details = $"Rotated pinned client certificate thumbprint to {thumbprint[..12]}... Reason: {req.Reason}"
+        }, ct);
+        return Results.Ok(new RotateDesktopCertificateResponse(true, thumbprint, DateTimeOffset.UtcNow, null));
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new RotateDesktopCertificateResponse(false, "", DateTimeOffset.UtcNow, ex.Message));
+    }
+});
+
+api.MapPost("/github/credentials", async (
+    SyncGitHubCredentialRequest req,
+    ISecretProtector protector,
+    AgentIdentityStore idStore,
+    ServerForgeStore sfStore,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.PersonalAccessToken))
+        return Results.BadRequest("Personal Access Token is required.");
+
+    var encrypted = protector.Protect(req.PersonalAccessToken.Trim(), "agent:github-pat");
+    idStore.StoreProtectedGitHubPat(encrypted);
+    await sfStore.RecordAuditAsync(new AuditLogRecord
+    {
+        Actor = user.Identity?.Name ?? "DesktopAdmin",
+        Action = "GitHub.AgentCredentialSynced",
+        TargetResource = "agent:github-pat",
+        Details = "GitHub PAT encrypted with DPAPI LocalMachine inside ACL-protected Agent store."
+    }, ct);
+    return Results.Ok(new { synced = true });
+});
+
+// ---- Complete Application Registration & Configuration API (Problem D) ----
+
+api.MapGet("/applications", async (ServerForgeStore store, CancellationToken ct) =>
+    Results.Ok(await store.GetApplicationsAsync(ct)));
+
+api.MapPost("/applications", async (
+    UpsertApplicationRequest req,
+    ServerForgeStore store,
+    IPathBoundaryGuard pathGuard,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    var appRoot = pathGuard.EnsureWithinRoot(agentOptions.AppsRoot, req.Slug);
+    var entity = new ManagedApplication
+    {
+        Id = req.Id ?? Guid.NewGuid(),
+        ProjectGroupId = req.ProjectGroupId == Guid.Empty ? Guid.NewGuid() : req.ProjectGroupId,
+        ServerId = Guid.Empty,
+        Name = req.Name.Trim(),
+        Slug = req.Slug.Trim().ToLowerInvariant(),
+        RuntimeType = req.RuntimeType,
+        ManagementState = req.RuntimeType == ApplicationRuntimeType.ClassicAsp
+            ? ResourceManagementState.ReadOnlyUnmanaged
+            : ResourceManagementState.ServerForgeCreated,
+        RepositoryFullName = req.RepositoryFullName.Trim(),
+        Branch = req.Branch.Trim(),
+        WorkingDirectory = string.IsNullOrWhiteSpace(req.WorkingDirectory) ? "." : req.WorkingDirectory.Trim(),
+        AutoDeployEnabled = req.AutoDeployEnabled,
+        RepositoryExplicitlyAuthorized = req.RepositoryExplicitlyAuthorized,
+        SourceMode = req.SourceMode,
+        GitHubWorkflowFileName = req.GitHubWorkflowFileName,
+        BuildCommand = req.BuildCommand ?? string.Empty,
+        StartCommand = req.StartCommand ?? string.Empty,
+        RuntimeVersion = req.RuntimeVersion ?? string.Empty,
+        InternalPort = req.InternalPort,
+        IisSiteName = string.IsNullOrWhiteSpace(req.IisSiteName) ? $"SF-{req.Slug}" : req.IisSiteName.Trim(),
+        IisAppPoolName = string.IsNullOrWhiteSpace(req.IisAppPoolName) ? $"SF-{req.Slug}-Pool" : req.IisAppPoolName.Trim(),
+        WindowsServiceName = string.IsNullOrWhiteSpace(req.WindowsServiceName) ? $"SF_{req.Slug.Replace('-', '_')}" : req.WindowsServiceName.Trim(),
+        PrimaryDomain = req.PrimaryDomain?.Trim() ?? string.Empty,
+        HealthCheckPath = string.IsNullOrWhiteSpace(req.HealthCheckPath) ? "/health" : req.HealthCheckPath.Trim(),
+        HealthCheckTimeoutSeconds = Math.Clamp(req.HealthCheckTimeoutSeconds, 5, 180),
+        RetainHealthyReleasesCount = Math.Clamp(req.RetainHealthyReleasesCount, 2, 20),
+        AutoRollbackOnFailure = req.AutoRollbackOnFailure,
+        ReleasesRootPath = appRoot,
+        PersistentDataPath = Path.Combine(appRoot, "data")
+    };
+
+    var validation = ApplicationConfigValidator.Validate(entity);
+    if (!validation.IsValid)
+        return Results.BadRequest(new { errors = validation.Errors });
+
+    await store.UpsertApplicationAsync(entity, user.Identity?.Name ?? "DesktopAdmin", ct);
+    return Results.Created($"/api/v1/applications/{entity.Id}", entity);
+});
+
+api.MapPut("/applications/{id:guid}", async (
+    Guid id,
+    UpsertApplicationRequest req,
+    ServerForgeStore store,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    var existing = await store.GetApplicationByIdAsync(id, ct);
+    if (existing is null) return Results.NotFound();
+
+    existing.Name = req.Name.Trim();
+    existing.RuntimeType = req.RuntimeType;
+    existing.RepositoryFullName = req.RepositoryFullName.Trim();
+    existing.Branch = req.Branch.Trim();
+    existing.WorkingDirectory = string.IsNullOrWhiteSpace(req.WorkingDirectory) ? "." : req.WorkingDirectory.Trim();
+    existing.AutoDeployEnabled = req.AutoDeployEnabled;
+    existing.RepositoryExplicitlyAuthorized = req.RepositoryExplicitlyAuthorized;
+    existing.SourceMode = req.SourceMode;
+    existing.GitHubWorkflowFileName = req.GitHubWorkflowFileName;
+    existing.BuildCommand = req.BuildCommand ?? string.Empty;
+    existing.StartCommand = req.StartCommand ?? string.Empty;
+    existing.RuntimeVersion = req.RuntimeVersion ?? string.Empty;
+    existing.InternalPort = req.InternalPort;
+    existing.PrimaryDomain = req.PrimaryDomain?.Trim() ?? string.Empty;
+    existing.HealthCheckPath = string.IsNullOrWhiteSpace(req.HealthCheckPath) ? "/health" : req.HealthCheckPath.Trim();
+    existing.AutoRollbackOnFailure = req.AutoRollbackOnFailure;
+
+    var validation = ApplicationConfigValidator.Validate(existing);
+    if (!validation.IsValid)
+        return Results.BadRequest(new { errors = validation.Errors });
+
+    await store.UpsertApplicationAsync(existing, user.Identity?.Name ?? "DesktopAdmin", ct);
+    return Results.Ok(existing);
+});
+
+api.MapPost("/applications/{id:guid}/autodeploy", async (
+    Guid id,
+    ToggleAutoDeployRequest req,
+    ServerForgeStore store,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    var existing = await store.GetApplicationByIdAsync(id, ct);
+    if (existing is null) return Results.NotFound();
+
+    if (req.Enabled && !req.RepositoryExplicitlyAuthorized)
+        return Results.BadRequest("Enabling auto-deploy requires explicit repository authorization.");
+
+    existing.AutoDeployEnabled = req.Enabled;
+    existing.RepositoryExplicitlyAuthorized = req.RepositoryExplicitlyAuthorized;
+    await store.UpsertApplicationAsync(existing, user.Identity?.Name ?? "DesktopAdmin", ct);
+    return Results.Ok(existing);
+});
+
+api.MapGet("/applications/{id:guid}/env", async (Guid id, EnvironmentTier? tier, ServerForgeStore store, CancellationToken ct) =>
+{
+    var vars = await store.GetEnvironmentVariablesAsync(id, tier, ct);
+    // Mask secret values before returning over API
+    var masked = vars.Select(v => new EnvVarItemDto(
+        v.Key,
+        v.IsSecret ? "••••••••" : v.ProtectedValue,
+        v.IsSecret,
+        v.IsRequired)).ToList();
+    return Results.Ok(masked);
+});
+
+api.MapPut("/applications/{id:guid}/env", async (
+    Guid id,
+    ConfigureEnvVarsRequest req,
+    ServerForgeStore store,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    var appRec = await store.GetApplicationByIdAsync(id, ct);
+    if (appRec is null) return Results.NotFound();
+
+    foreach (var v in req.Variables)
+    {
+        if (string.IsNullOrWhiteSpace(v.Key)) continue;
+        await store.SaveEnvironmentVariableAsync(id, req.Tier, v.Key.Trim(), v.Value, v.IsSecret, v.IsRequired, user.Identity?.Name ?? "DesktopAdmin", ct);
+    }
+    return Results.Ok(new { updated = req.Variables.Count });
+});
+
+api.MapPut("/applications/{id:guid}/domains", async (
+    Guid id,
+    ConfigureDomainRequest req,
+    ServerForgeStore store,
+    IIisManager iis,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    var appRec = await store.GetApplicationByIdAsync(id, ct);
+    if (appRec is null) return Results.NotFound();
+
+    var check = DomainValidator.ValidateHostname(req.Hostname, allowLocalTestHostname: true);
+    if (!check.IsValid) return Results.BadRequest(new { errors = check.Errors });
+
+    var conflicts = await iis.DetectBindingConflictsAsync(req.Hostname, req.HttpPort, appRec.IisSiteName, ct);
+    if (conflicts.Count > 0)
+        return Results.Conflict(new { conflicts });
+
+    var binding = new DomainBindingRecord
+    {
+        ApplicationId = id,
+        Hostname = req.Hostname.Trim(),
+        HttpPort = req.HttpPort,
+        HttpsPort = req.HttpsPort,
+        HttpsEnabled = req.HttpsEnabled,
+        UseWinAcmeLetsEncrypt = req.UseWinAcmeLetsEncrypt
+    };
+
+    appRec.PrimaryDomain = binding.Hostname;
+    await store.UpsertDomainAsync(binding, user.Identity?.Name ?? "DesktopAdmin", ct);
+    await store.UpsertApplicationAsync(appRec, user.Identity?.Name ?? "DesktopAdmin", ct);
+    return Results.Ok(binding);
+});
+
+api.MapGet("/applications/{id:guid}/deployments", async (Guid id, ServerForgeStore store, CancellationToken ct) =>
+    Results.Ok(await store.GetDeploymentHistoryAsync(id, 100, ct)));
+
+api.MapGet("/applications/{id:guid}/releases", async (Guid id, ServerForgeStore store, CancellationToken ct) =>
+{
+    var appRec = await store.GetApplicationByIdAsync(id, ct);
+    if (appRec is null) return Results.NotFound();
+
+    var releasesDir = Path.Combine(appRec.ReleasesRootPath, "releases");
+    if (!Directory.Exists(releasesDir))
+        return Results.Ok(Array.Empty<ReleaseSummaryDto>());
+
+    var releases = new DirectoryInfo(releasesDir)
+        .GetDirectories()
+        .OrderByDescending(d => d.CreationTimeUtc)
+        .Select(d => new ReleaseSummaryDto(
+            ReleaseId: d.Name,
+            FullPath: d.FullName,
+            IsActive: d.FullName.Equals(appRec.ActiveReleasePath, StringComparison.OrdinalIgnoreCase),
+            IsLastKnownGood: d.FullName.Equals(appRec.LastKnownGoodReleasePath, StringComparison.OrdinalIgnoreCase),
+            CreatedAtUtc: d.CreationTimeUtc,
+            SizeBytes: d.EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length)))
+        .ToList();
+
+    return Results.Ok(releases);
+});
+
+// Removes ONLY ServerForge management metadata; NEVER deletes hosted files, IIS sites, or databases!
+api.MapDelete("/applications/{id:guid}", async (Guid id, ServerForgeStore store, ClaimsPrincipal user, CancellationToken ct) =>
+{
+    var removed = await store.RemoveApplicationFromManagementAsync(id, user.Identity?.Name ?? "DesktopAdmin", ct);
+    return removed
+        ? Results.Ok(new { removed = true, hostedFilesPreserved = true })
+        : Results.NotFound();
+});
+
+// ---- Diagnostics, Telemetry, IIS Adoption & Deployments ----
 
 api.MapGet("/diagnostics", async (IServerTelemetryProvider telemetry, CancellationToken ct) =>
     Results.Ok(await telemetry.CollectDiagnosticsAsync(identityStore.State.AgentId, ct)));
@@ -191,11 +460,33 @@ api.MapGet("/diagnostics", async (IServerTelemetryProvider telemetry, Cancellati
 api.MapGet("/telemetry", async (IServerTelemetryProvider telemetry, ServerForgeStore store, CancellationToken ct) =>
 {
     var apps = await store.GetApplicationsAsync(ct);
-    return Results.Ok(await telemetry.CollectTelemetryAsync(identityStore.State.AgentId, apps, [], ct));
+    var dbs = await store.GetDatabaseServersAsync(ct);
+    return Results.Ok(await telemetry.CollectTelemetryAsync(identityStore.State.AgentId, apps, dbs, ct));
 });
 
 api.MapGet("/iis/sites", async (IIisManager iis, CancellationToken ct) =>
     Results.Ok(await iis.DiscoverSitesAsync(ct)));
+
+api.MapPost("/iis/sites/adopt", async (
+    AdoptIisSiteRequest req,
+    IIisManager iis,
+    ServerForgeStore store,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    if (!req.OperatorReviewedDryRun || string.IsNullOrWhiteSpace(req.SiteName))
+        return Results.BadRequest("Explicit dry-run review confirmation and site name are required to adopt a pre-existing IIS site.");
+
+    iis.RegisterManagedSite(req.SiteName.Trim());
+    await store.RecordAuditAsync(new AuditLogRecord
+    {
+        Actor = user.Identity?.Name ?? "DesktopAdmin",
+        Action = "IIS.SiteAdopted",
+        TargetResource = req.SiteName.Trim(),
+        Details = $"Operator explicitly adopted pre-existing IIS site. Note: {req.ConfirmationNote}"
+    }, ct);
+    return Results.Ok(new { adopted = true, siteName = req.SiteName.Trim() });
+});
 
 api.MapPost("/deployments/trigger", async (
     TriggerDeploymentRequest request,
@@ -203,8 +494,7 @@ api.MapPost("/deployments/trigger", async (
     IDeploymentEngine engine,
     CancellationToken ct) =>
 {
-    var apps = await store.GetApplicationsAsync(ct);
-    var target = apps.FirstOrDefault(a => a.Id == request.ApplicationId);
+    var target = await store.GetApplicationByIdAsync(request.ApplicationId, ct);
     if (target is null)
         return Results.NotFound($"Application {request.ApplicationId} is not registered on this agent.");
 
@@ -222,13 +512,48 @@ api.MapPost("/deployments/{applicationId:guid}/rollback", async (
     ClaimsPrincipal user,
     CancellationToken ct) =>
 {
-    var apps = await store.GetApplicationsAsync(ct);
-    var target = apps.FirstOrDefault(a => a.Id == applicationId);
+    var target = await store.GetApplicationByIdAsync(applicationId, ct);
     if (target is null) return Results.NotFound();
 
     var record = await engine.RollbackToLastHealthyReleaseAsync(target, user.Identity?.Name ?? "DesktopAdmin", ct);
     await store.RecordDeploymentAsync(record, ct);
+    await store.UpsertApplicationAsync(target, user.Identity?.Name ?? "DesktopAdmin", ct);
     return Results.Ok(record);
+});
+
+api.MapPost("/databases/test", async (
+    DatabaseConnectionTestRequest req,
+    ISqlServerManager sql,
+    IPostgreSqlManager pg,
+    CancellationToken ct) =>
+{
+    var rec = new DatabaseServerRecord { Id = req.DatabaseServerId, DisplayName = req.DisplayName, Engine = req.Engine };
+    var health = req.Engine == DatabaseEngineType.SqlServer
+        ? await sql.TestConnectionAsync(rec, req.ConnectionString, ct)
+        : await pg.TestConnectionAsync(rec, req.ConnectionString, ct);
+    return Results.Ok(health);
+});
+
+api.MapPost("/databases/backup", async (
+    DatabaseBackupRequest req,
+    ISqlServerManager sql,
+    IPostgreSqlManager pg,
+    ServerForgeStore store,
+    ClaimsPrincipal user,
+    CancellationToken ct) =>
+{
+    var file = req.Engine == DatabaseEngineType.SqlServer
+        ? await sql.BackupDatabaseAsync(req.ConnectionString, req.DatabaseName, req.BackupDirectory, ct)
+        : await pg.BackupDatabaseAsync(req.ConnectionString, req.DatabaseName, req.BackupDirectory, ct);
+
+    await store.RecordAuditAsync(new AuditLogRecord
+    {
+        Actor = user.Identity?.Name ?? "DesktopAdmin",
+        Action = "Database.BackupCompleted",
+        TargetResource = $"{req.Engine}/{req.DatabaseName}",
+        Details = $"Backup saved to {file}"
+    }, ct);
+    return Results.Ok(new { backupFile = file });
 });
 
 api.MapGet("/audit", async (ServerForgeStore store, CancellationToken ct) =>

@@ -10,7 +10,8 @@ namespace ServerForge.Agent.Workers;
 
 /// <summary>
 /// Autonomous background Windows Service worker that polls authorized GitHub repositories using
-/// conditional ETag requests and executes staged deployments even when ServerForge Desktop is closed.
+/// conditional ETag requests, prevents duplicate commit deploys, verifies workflow + artifact provenance,
+/// and executes staged deployments even when ServerForge Desktop is closed.
 /// </summary>
 public sealed class GitHubAutoDeployWorker : BackgroundService
 {
@@ -102,25 +103,45 @@ public sealed class GitHubAutoDeployWorker : BackgroundService
             if (string.Equals(app.LastDeployedCommitSha, head.LatestCommitSha, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            _logger.LogInformation("Detected new commit {Sha} on {Repo}:{Branch} for {App}. Obtaining verified build artifact.",
+            // Persistent duplicate-commit guard across Agent restarts
+            if (await _store.HasActiveOrSucceededDeploymentForCommitAsync(app.Id, head.LatestCommitSha, ct))
+                continue;
+
+            _logger.LogInformation("Detected new commit {Sha} on {Repo}:{Branch} for {App}. Verifying workflow artifact.",
                 head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], app.RepositoryFullName, app.Branch, app.Name);
 
             string? localArtifactZip = null;
-            string? artifactSha = null;
+            string? trustedDigest = null;
+            long? workflowRunId = null;
+            long? artifactId = null;
+            string? artifactName = null;
+            string? trustSource = null;
 
             if (app.SourceMode == DeploymentSourceMode.GitHubActionsArtifact)
             {
                 var artifactPath = Path.Combine(_options.DataRoot, "artifacts", app.Slug, $"{head.LatestCommitSha}.zip");
-                var dl = await _github.DownloadVerifiedWorkflowArtifactAsync(pat, app.RepositoryFullName, head.LatestCommitSha, artifactPath, ct);
-                if (!dl.Found)
+                var dl = await _github.DownloadVerifiedWorkflowArtifactAsync(
+                    pat,
+                    app.RepositoryFullName,
+                    app.Branch,
+                    head.LatestCommitSha,
+                    app.GitHubWorkflowFileName,
+                    artifactPath,
+                    ct);
+
+                if (!dl.Found || string.IsNullOrWhiteSpace(dl.TrustedApiDigestSha256))
                 {
-                    _logger.LogInformation("Waiting for GitHub Actions artifact for {App}@{Sha}: {Reason}",
+                    _logger.LogInformation("Waiting for verified GitHub Actions artifact for {App}@{Sha}: {Reason}",
                         app.Slug, head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], dl.ErrorMessage);
                     continue;
                 }
 
                 localArtifactZip = dl.LocalZipPath;
-                artifactSha = dl.ComputedSha256;
+                trustedDigest = dl.TrustedApiDigestSha256;
+                workflowRunId = dl.WorkflowRunId;
+                artifactId = dl.ArtifactId;
+                artifactName = dl.ArtifactName;
+                trustSource = dl.TrustSource;
             }
 
             var envVars = await _store.ResolveDecryptedEnvVarsAsync(app.Id, EnvironmentTier.Production, ct);
@@ -131,9 +152,13 @@ public sealed class GitHubAutoDeployWorker : BackgroundService
                 CommitMessage: head.CommitMessage,
                 CommitAuthor: head.CommitAuthor,
                 ArtifactDownloadUrl: localArtifactZip,
-                ExpectedArtifactSha256: artifactSha,
+                ExpectedArtifactSha256: trustedDigest,
                 TriggeredAutomatically: true,
-                RequestedBy: "ServerForge.Agent.AutoDeploy");
+                RequestedBy: "ServerForge.Agent.AutoDeploy",
+                VerifiedWorkflowRunId: workflowRunId,
+                VerifiedArtifactId: artifactId,
+                VerifiedArtifactName: artifactName,
+                ArtifactTrustSource: trustSource);
 
             var record = await _deploymentEngine.EnqueueAndExecuteAsync(app, trigger, envVars, cancellationToken: ct);
             await _store.RecordDeploymentAsync(record, ct);

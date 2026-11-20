@@ -17,6 +17,13 @@ public interface IPathBoundaryGuard
     bool IsValidWorkingDirectory(string workingDirectory);
 }
 
+public interface IDeploymentStatePersistence
+{
+    Task SaveDeploymentSnapshotAsync(DeploymentRecord record, CancellationToken ct = default);
+    Task<bool> HasActiveOrSucceededDeploymentForCommitAsync(Guid applicationId, string commitSha, CancellationToken ct = default);
+    Task<int> RecoverInterruptedDeploymentsAsync(CancellationToken ct = default);
+}
+
 public interface IDeploymentEngine
 {
     Task<DeploymentRecord> EnqueueAndExecuteAsync(
@@ -72,6 +79,7 @@ public interface IIisManager
     Task SwitchSitePhysicalPathAsync(ManagedApplication app, string newReleasePath, CancellationToken ct);
     Task ConfigureReverseProxyWebConfigAsync(ManagedApplication app, string siteRootPath, CancellationToken ct);
     Task SetSiteStateAsync(string siteName, ResourceManagementState managementState, bool start, CancellationToken ct);
+    void RegisterManagedSite(string siteName);
 }
 
 public interface IWindowsServiceManager
@@ -93,7 +101,9 @@ public interface IGitHubClient
     Task<GitHubArtifactDownloadResult> DownloadVerifiedWorkflowArtifactAsync(
         string personalAccessToken,
         string repositoryFullName,
+        string branch,
         string commitSha,
+        string? expectedWorkflowFileName,
         string destinationZipPath,
         CancellationToken ct);
 }
@@ -135,7 +145,11 @@ public sealed record GitHubArtifactDownloadResult(
     bool Found,
     string? LocalZipPath,
     string? ComputedSha256,
+    string? TrustedApiDigestSha256,
     long? WorkflowRunId,
+    long? ArtifactId,
+    string? ArtifactName,
+    string? TrustSource,
     string? ErrorMessage);
 
 public interface ISqlServerManager

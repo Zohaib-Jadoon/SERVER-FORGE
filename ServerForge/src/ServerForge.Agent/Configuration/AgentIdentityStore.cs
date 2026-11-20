@@ -19,8 +19,10 @@ public sealed class AgentIdentityState
     public string AgentId { get; set; } = Guid.NewGuid().ToString("N");
     public string? PairedDesktopInstanceId { get; set; }
     public string? PairedDesktopCertThumbprint { get; set; }
+    public string? PreviousDesktopCertThumbprint { get; set; }
     public string? ProtectedGitHubPat { get; set; }
     public DateTimeOffset? PairedAtUtc { get; set; }
+    public DateTimeOffset? LastCertRotatedAtUtc { get; set; }
     public bool IsPaired => !string.IsNullOrWhiteSpace(PairedDesktopCertThumbprint);
 }
 
@@ -62,6 +64,22 @@ public sealed class AgentIdentityStore
             State.PairedDesktopCertThumbprint = MutualTlsCertificateManager.NormalizeThumbprint(desktopCertThumbprint);
             State.PairedAtUtc = DateTimeOffset.UtcNow;
             PersistState();
+        }
+    }
+
+    public string RotateDesktopCertificate(string desktopInstanceId, string newDesktopCertThumbprint)
+    {
+        lock (_lock)
+        {
+            if (!string.Equals(State.PairedDesktopInstanceId, desktopInstanceId, StringComparison.Ordinal))
+                throw new UnauthorizedAccessException("Desktop instance ID does not match the paired desktop.");
+
+            var normalized = MutualTlsCertificateManager.NormalizeThumbprint(newDesktopCertThumbprint);
+            State.PreviousDesktopCertThumbprint = State.PairedDesktopCertThumbprint;
+            State.PairedDesktopCertThumbprint = normalized;
+            State.LastCertRotatedAtUtc = DateTimeOffset.UtcNow;
+            PersistState();
+            return normalized;
         }
     }
 
