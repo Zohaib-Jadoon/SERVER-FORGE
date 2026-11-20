@@ -27,7 +27,10 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
     public async Task<LocalAdminProfile?> GetLocalAdminAsync(CancellationToken ct = default)
     {
         await using var db = await _factory.CreateDbContextAsync(ct);
-        return await db.AdminProfiles.OrderBy(a => a.CreatedAtUtc).FirstOrDefaultAsync(ct);
+        return await db.AdminProfiles
+            .OrderBy(a => a.CreatedAtUtc)
+            .ThenBy(a => a.Id)
+            .FirstOrDefaultAsync(ct);
     }
 
     public async Task SaveLocalAdminAsync(LocalAdminProfile profile, CancellationToken ct = default)
@@ -558,14 +561,31 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
         return interrupted.Count;
     }
 
-    public async Task<IReadOnlyList<DeploymentRecord>> GetDeploymentHistoryAsync(Guid? applicationId = null, int take = 50, CancellationToken ct = default)
+    public Task<IReadOnlyList<DeploymentRecord>> GetDeploymentHistoryAsync(Guid? applicationId = null, int take = 50, CancellationToken ct = default)
+        => GetDeploymentHistoryAsync(applicationId, skip: 0, take: take, ct);
+
+    public async Task<IReadOnlyList<DeploymentRecord>> GetDeploymentHistoryAsync(Guid? applicationId, int skip, int take, CancellationToken ct = default)
     {
+        if (skip < 0)
+            throw new ArgumentOutOfRangeException(nameof(skip), "Skip cannot be negative.");
+        if (take < 0)
+            throw new ArgumentOutOfRangeException(nameof(take), "Take cannot be negative.");
+
+        ct.ThrowIfCancellationRequested();
+        if (take == 0)
+            return [];
+
         await using var db = await _factory.CreateDbContextAsync(ct);
-        var query = db.Deployments.AsQueryable();
+        var query = db.Deployments.AsNoTracking().AsQueryable();
         if (applicationId.HasValue)
             query = query.Where(d => d.ApplicationId == applicationId.Value);
 
-        return await query.OrderByDescending(d => d.QueuedAtUtc).Take(take).ToListAsync(ct);
+        var ordered = query
+            .OrderByDescending(d => d.QueuedAtUtc)
+            .ThenByDescending(d => d.Id);
+
+        var paged = skip > 0 ? ordered.Skip(skip).Take(take) : ordered.Take(take);
+        return await paged.ToListAsync(ct);
     }
 
     public async Task RecordAuditAsync(AuditLogRecord entry, CancellationToken ct = default)
@@ -575,9 +595,27 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task<IReadOnlyList<AuditLogRecord>> GetRecentAuditLogsAsync(int take = 100, CancellationToken ct = default)
+    public Task<IReadOnlyList<AuditLogRecord>> GetRecentAuditLogsAsync(int take = 100, CancellationToken ct = default)
+        => GetRecentAuditLogsAsync(skip: 0, take: take, ct);
+
+    public async Task<IReadOnlyList<AuditLogRecord>> GetRecentAuditLogsAsync(int skip, int take, CancellationToken ct = default)
     {
+        if (skip < 0)
+            throw new ArgumentOutOfRangeException(nameof(skip), "Skip cannot be negative.");
+        if (take < 0)
+            throw new ArgumentOutOfRangeException(nameof(take), "Take cannot be negative.");
+
+        ct.ThrowIfCancellationRequested();
+        if (take == 0)
+            return [];
+
         await using var db = await _factory.CreateDbContextAsync(ct);
-        return await db.AuditLogs.OrderByDescending(a => a.TimestampUtc).Take(take).ToListAsync(ct);
+        var ordered = db.AuditLogs
+            .AsNoTracking()
+            .OrderByDescending(a => a.TimestampUtc)
+            .ThenByDescending(a => a.Id);
+
+        var paged = skip > 0 ? ordered.Skip(skip).Take(take) : ordered.Take(take);
+        return await paged.ToListAsync(ct);
     }
 }

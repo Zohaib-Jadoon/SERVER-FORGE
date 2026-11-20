@@ -490,6 +490,605 @@ public sealed class DeploymentAndPersistenceTests
     }
 
     [Fact]
+    public async Task SqliteStore_DeploymentHistory_HandlesEmptySingleMultipleOffsetsSameTimestampPaginationAndReopen()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-deploy-order-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var dbFile = Path.Combine(tempRoot, "deploy-history.db");
+
+        try
+        {
+            static ServerForgeStore CreateStore(string path, out DbContextOptions<ServerForgeDbContext> options)
+            {
+                options = new DbContextOptionsBuilder<ServerForgeDbContext>()
+                    .UseSqlite($"Data Source={path}")
+                    .Options;
+                var localOpts = options;
+                var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+                factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                    .ReturnsAsync(() => new ServerForgeDbContext(localOpts));
+                return new ServerForgeStore(factoryMock.Object, new DpapiSecretProtector());
+            }
+
+            var store = CreateStore(dbFile, out var opts);
+            await using (var init = new ServerForgeDbContext(opts))
+                await init.InitializeSqliteAsync();
+
+            var project = await store.EnsureDefaultProjectAsync("unit-test");
+            var app = new ManagedApplication
+            {
+                ProjectGroupId = project.Id,
+                Name = "Billing API",
+                Slug = "billing-api",
+                RuntimeType = ApplicationRuntimeType.NestJsApi,
+                RepositoryFullName = "owner/billing-api",
+                RepositoryExplicitlyAuthorized = true,
+                InternalPort = 4020
+            };
+            await store.UpsertApplicationAsync(app, "unit-test");
+
+            // 1. Empty deployment history
+            Assert.Empty(await store.GetDeploymentHistoryAsync(app.Id));
+            Assert.Empty(await store.GetDeploymentHistoryAsync(app.Id, take: 0));
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.GetDeploymentHistoryAsync(app.Id, take: -1));
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.GetDeploymentHistoryAsync(app.Id, skip: -1, take: 5));
+
+            // 2. Single deployment
+            var depEarliest = new DeploymentRecord
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000010"),
+                ApplicationId = app.Id,
+                CommitSha = Commit1,
+                Branch = "main",
+                State = DeploymentState.Successful,
+                // 2026-11-19T10:00:00Z expressed in UTC+05:30
+                QueuedAtUtc = new DateTimeOffset(2026, 11, 19, 15, 30, 0, TimeSpan.FromMinutes(330))
+            };
+            await store.RecordDeploymentAsync(depEarliest);
+            var single = await store.GetDeploymentHistoryAsync(app.Id);
+            Assert.Single(single);
+            Assert.Equal(depEarliest.Id, single[0].Id);
+            Assert.Equal(TimeSpan.Zero, single[0].QueuedAtUtc.Offset);
+
+            // 3. Multiple deployments with different UTC offsets + exact same-timestamp tie-break
+            var sameInstantUtc = new DateTimeOffset(2026, 11, 19, 11, 0, 0, TimeSpan.Zero);
+            var depTieLow = new DeploymentRecord
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000021"),
+                ApplicationId = app.Id,
+                CommitSha = Commit2,
+                Branch = "main",
+                State = DeploymentState.Successful,
+                // 2026-11-19T11:00:00Z expressed in UTC-05:00
+                QueuedAtUtc = sameInstantUtc.ToOffset(TimeSpan.FromHours(-5))
+            };
+            var depTieHigh = new DeploymentRecord
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000022"),
+                ApplicationId = app.Id,
+                CommitSha = Commit2,
+                Branch = "main",
+                State = DeploymentState.Successful,
+                // Same UTC instant expressed in UTC+09:00
+                QueuedAtUtc = sameInstantUtc.ToOffset(TimeSpan.FromHours(9))
+            };
+            var depLatest = new DeploymentRecord
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000030"),
+                ApplicationId = app.Id,
+                CommitSha = Commit3,
+                Branch = "main",
+                State = DeploymentState.Successful,
+                // 2026-11-19T12:15:30.2500000Z expressed in UTC-07:00
+                QueuedAtUtc = new DateTimeOffset(2026, 11, 19, 5, 15, 30, 250, TimeSpan.FromHours(-7))
+            };
+            var depMiddle = new DeploymentRecord
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000015"),
+                ApplicationId = app.Id,
+                CommitSha = Commit1,
+                Branch = "main",
+                State = DeploymentState.Failed,
+                // 2026-11-19T10:30:00Z
+                QueuedAtUtc = new DateTimeOffset(2026, 11, 19, 10, 30, 0, TimeSpan.Zero)
+            };
+
+            // Insert intentionally out of chronological order
+            await store.RecordDeploymentAsync(depTieLow);
+            await store.RecordDeploymentAsync(depLatest);
+            await store.RecordDeploymentAsync(depMiddle);
+            await store.RecordDeploymentAsync(depTieHigh);
+
+            var expectedOrder = new[] { depLatest.Id, depTieHigh.Id, depTieLow.Id, depMiddle.Id, depEarliest.Id };
+
+            var all = await store.GetDeploymentHistoryAsync(app.Id, take: 50);
+            Assert.Equal(expectedOrder, all.Select(d => d.Id).ToArray());
+
+            // 4. Pagination limits (take & skip/take)
+            var topTwo = await store.GetDeploymentHistoryAsync(app.Id, take: 2);
+            Assert.Equal(new[] { depLatest.Id, depTieHigh.Id }, topTwo.Select(d => d.Id).ToArray());
+
+            var page2 = await store.GetDeploymentHistoryAsync(app.Id, skip: 2, take: 2);
+            Assert.Equal(new[] { depTieLow.Id, depMiddle.Id }, page2.Select(d => d.Id).ToArray());
+
+            var page3 = await store.GetDeploymentHistoryAsync(app.Id, skip: 4, take: 2);
+            Assert.Equal(new[] { depEarliest.Id }, page3.Select(d => d.Id).ToArray());
+
+            // 5. Cancellation token honored
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.GetDeploymentHistoryAsync(app.Id, take: 10, cts.Token));
+
+            // 6. Persistence after closing pools and reopening SQLite
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            var reopenedStore = CreateStore(dbFile, out _);
+            var afterReopen = await reopenedStore.GetDeploymentHistoryAsync(app.Id, take: 10);
+            Assert.Equal(expectedOrder, afterReopen.Select(d => d.Id).ToArray());
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SqliteStore_RecentAuditLogs_AndLocalAdminRetrieval_OrderDeterministicallyAcrossOffsetsAndReopen()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-audit-admin-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var dbFile = Path.Combine(tempRoot, "audit-admin.db");
+
+        try
+        {
+            static ServerForgeStore CreateStore(string path, out DbContextOptions<ServerForgeDbContext> options)
+            {
+                options = new DbContextOptionsBuilder<ServerForgeDbContext>()
+                    .UseSqlite($"Data Source={path}")
+                    .Options;
+                var localOpts = options;
+                var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+                factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                    .ReturnsAsync(() => new ServerForgeDbContext(localOpts));
+                return new ServerForgeStore(factoryMock.Object, new DpapiSecretProtector());
+            }
+
+            var store = CreateStore(dbFile, out var opts);
+            await using (var init = new ServerForgeDbContext(opts))
+                await init.InitializeSqliteAsync();
+
+            // Local admin retrieval: earliest CreatedAtUtc across mixed offsets + deterministic Id tie-break
+            var earliestAdminInstant = new DateTimeOffset(2026, 1, 10, 8, 0, 0, TimeSpan.Zero);
+            var adminLater = new LocalAdminProfile
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000003"),
+                DisplayName = "Later Admin",
+                Username = "admin-later",
+                PasswordHash = "hash3",
+                PasswordSalt = "salt3",
+                // 2026-01-10T09:00:00Z expressed in UTC-04:00
+                CreatedAtUtc = new DateTimeOffset(2026, 1, 10, 5, 0, 0, TimeSpan.FromHours(-4))
+            };
+            var adminTieHigh = new LocalAdminProfile
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000002"),
+                DisplayName = "Tie High",
+                Username = "admin-tie-high",
+                PasswordHash = "hash2",
+                PasswordSalt = "salt2",
+                CreatedAtUtc = earliestAdminInstant.ToOffset(TimeSpan.FromHours(5))
+            };
+            var adminTieLow = new LocalAdminProfile
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000001"),
+                DisplayName = "Primary Admin",
+                Username = "admin-primary",
+                PasswordHash = "hash1",
+                PasswordSalt = "salt1",
+                CreatedAtUtc = earliestAdminInstant.ToOffset(TimeSpan.FromHours(-8))
+            };
+
+            await store.SaveLocalAdminAsync(adminLater);
+            await store.SaveLocalAdminAsync(adminTieHigh);
+            await store.SaveLocalAdminAsync(adminTieLow);
+
+            var resolvedAdmin = await store.GetLocalAdminAsync();
+            Assert.NotNull(resolvedAdmin);
+            Assert.Equal(adminTieLow.Id, resolvedAdmin!.Id);
+            Assert.Equal("admin-primary", resolvedAdmin.Username);
+
+            // Recent audit logs: mixed offsets, same-timestamp deterministic Id descending, pagination
+            var sharedAuditTime = new DateTimeOffset(2026, 11, 19, 14, 0, 0, TimeSpan.Zero);
+            await store.RecordAuditAsync(new AuditLogRecord
+            {
+                Actor = "op",
+                Action = "Audit.Oldest",
+                TargetResource = "r1",
+                // 2026-11-19T13:00:00Z in UTC+06:00
+                TimestampUtc = new DateTimeOffset(2026, 11, 19, 19, 0, 0, TimeSpan.FromHours(6))
+            });
+            await store.RecordAuditAsync(new AuditLogRecord
+            {
+                Actor = "op",
+                Action = "Audit.TieFirstInserted",
+                TargetResource = "r2",
+                TimestampUtc = sharedAuditTime.ToOffset(TimeSpan.FromHours(-3))
+            });
+            await store.RecordAuditAsync(new AuditLogRecord
+            {
+                Actor = "op",
+                Action = "Audit.TieSecondInserted",
+                TargetResource = "r3",
+                TimestampUtc = sharedAuditTime.ToOffset(TimeSpan.FromHours(4))
+            });
+            await store.RecordAuditAsync(new AuditLogRecord
+            {
+                Actor = "op",
+                Action = "Audit.Newest",
+                TargetResource = "r4",
+                // 2026-11-19T15:00:00Z in UTC-05:00
+                TimestampUtc = new DateTimeOffset(2026, 11, 19, 10, 0, 0, TimeSpan.FromHours(-5))
+            });
+
+            var expectedActions = new[] { "Audit.Newest", "Audit.TieSecondInserted", "Audit.TieFirstInserted", "Audit.Oldest" };
+            var recent = await store.GetRecentAuditLogsAsync(take: 10);
+            Assert.Equal(expectedActions, recent.Select(a => a.Action).ToArray());
+
+            var paged = await store.GetRecentAuditLogsAsync(skip: 1, take: 2);
+            Assert.Equal(new[] { "Audit.TieSecondInserted", "Audit.TieFirstInserted" }, paged.Select(a => a.Action).ToArray());
+            Assert.Empty(await store.GetRecentAuditLogsAsync(take: 0));
+
+            // Reopen SQLite and confirm persistence & ordering
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            var reopenedStore = CreateStore(dbFile, out _);
+            var reopenedAdmin = await reopenedStore.GetLocalAdminAsync();
+            Assert.Equal(adminTieLow.Id, reopenedAdmin!.Id);
+            var reopenedAudit = await reopenedStore.GetRecentAuditLogsAsync(take: 10);
+            Assert.Equal(expectedActions, reopenedAudit.Select(a => a.Action).ToArray());
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SqliteSchemaMigrator_FreshInstall_AndLegacyUpgrade_PreservesAllMetadataAndCreatesBackup()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-migration-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var freshDbFile = Path.Combine(tempRoot, "fresh.db");
+        var legacyDbFile = Path.Combine(tempRoot, "legacy.db");
+
+        try
+        {
+            // 1. Fresh installation
+            var freshOpts = new DbContextOptionsBuilder<ServerForgeDbContext>()
+                .UseSqlite($"Data Source={freshDbFile}")
+                .Options;
+            await using (var freshDb = new ServerForgeDbContext(freshOpts))
+            {
+                var freshResult = await freshDb.InitializeSqliteAsync();
+                Assert.True(freshResult.WasFreshDatabase);
+                Assert.Equal(0, freshResult.PreviousVersion);
+                Assert.Equal(SqliteSchemaMigrator.LatestSchemaVersion, freshResult.CurrentVersion);
+                Assert.Null(freshResult.BackupFilePath);
+
+                // Second call on fresh DB is idempotent and does not re-migrate
+                var secondCall = await freshDb.InitializeSqliteAsync();
+                Assert.False(secondCall.WasFreshDatabase);
+                Assert.Empty(secondCall.AppliedVersions);
+                Assert.Null(secondCall.BackupFilePath);
+            }
+
+            // 2. Construct a genuine legacy pre-migration SQLite database (no __ServerForgeSchemaVersions,
+            //    missing BackupJobs table, and legacy EF Core DateTimeOffset strings with mixed UTC offsets)
+            var protector = new DpapiSecretProtector();
+            var encryptedPat = protector.Protect("ghp_legacy_secret_value", "vault:github:pat");
+            var projectId = Guid.NewGuid();
+            var serverId = Guid.NewGuid();
+            var appId = Guid.NewGuid();
+            var adminId = Guid.NewGuid();
+            var envVarId = Guid.NewGuid();
+            var depOlderId = Guid.Parse("00000000-0000-0000-0000-000000000101");
+            var depNewerId = Guid.Parse("00000000-0000-0000-0000-000000000102");
+            var encryptedEnvVal = protector.Protect("super-db-pass", $"env:{appId}:Production:DB_PASSWORD");
+
+            await using (var rawConn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={legacyDbFile};Pooling=False"))
+            {
+                await rawConn.OpenAsync();
+                await using var cmd = rawConn.CreateCommand();
+                cmd.CommandText = """
+                    CREATE TABLE "AdminProfiles" (
+                        "Id" TEXT NOT NULL PRIMARY KEY,
+                        "DisplayName" TEXT NOT NULL,
+                        "Username" TEXT NOT NULL,
+                        "PasswordHash" TEXT NOT NULL,
+                        "PasswordSalt" TEXT NOT NULL,
+                        "DarkThemeEnabled" INTEGER NOT NULL,
+                        "DemoModeEnabled" INTEGER NOT NULL,
+                        "CreatedAtUtc" TEXT NOT NULL
+                    );
+                    CREATE TABLE "VaultSecrets" (
+                        "Key" TEXT NOT NULL PRIMARY KEY,
+                        "ProtectedValue" TEXT NOT NULL,
+                        "UpdatedAtUtc" TEXT NOT NULL
+                    );
+                    CREATE TABLE "Projects" (
+                        "Id" TEXT NOT NULL PRIMARY KEY,
+                        "Name" TEXT NOT NULL,
+                        "Slug" TEXT NOT NULL,
+                        "Description" TEXT NOT NULL,
+                        "CreatedAtUtc" TEXT NOT NULL
+                    );
+                    CREATE TABLE "Servers" (
+                        "Id" TEXT NOT NULL PRIMARY KEY,
+                        "AgentId" TEXT NOT NULL,
+                        "DisplayName" TEXT NOT NULL,
+                        "HostAddress" TEXT NOT NULL,
+                        "AgentPort" INTEGER NOT NULL,
+                        "RequirePrivateNetworkOrVpn" INTEGER NOT NULL,
+                        "PinnedServerCertThumbprint" TEXT NOT NULL,
+                        "ClientCertThumbprint" TEXT NOT NULL,
+                        "Status" INTEGER NOT NULL,
+                        "OsVersion" TEXT NULL,
+                        "IisVersion" TEXT NULL,
+                        "LastSeenUtc" TEXT NULL,
+                        "CreatedAtUtc" TEXT NOT NULL
+                    );
+                    CREATE TABLE "Applications" (
+                        "Id" TEXT NOT NULL PRIMARY KEY,
+                        "ProjectGroupId" TEXT NOT NULL,
+                        "ServerId" TEXT NOT NULL,
+                        "Name" TEXT NOT NULL,
+                        "Slug" TEXT NOT NULL,
+                        "RuntimeType" INTEGER NOT NULL,
+                        "ManagementState" INTEGER NOT NULL,
+                        "RepositoryFullName" TEXT NOT NULL,
+                        "Branch" TEXT NOT NULL,
+                        "WorkingDirectory" TEXT NOT NULL,
+                        "AutoDeployEnabled" INTEGER NOT NULL,
+                        "RepositoryExplicitlyAuthorized" INTEGER NOT NULL,
+                        "SourceMode" INTEGER NOT NULL,
+                        "GitHubWorkflowFileName" TEXT NULL,
+                        "BuildCommand" TEXT NOT NULL,
+                        "StartCommand" TEXT NOT NULL,
+                        "RuntimeVersion" TEXT NOT NULL,
+                        "InternalPort" INTEGER NOT NULL,
+                        "ServiceAccountName" TEXT NOT NULL,
+                        "IisSiteName" TEXT NOT NULL,
+                        "IisAppPoolName" TEXT NOT NULL,
+                        "WindowsServiceName" TEXT NOT NULL,
+                        "PrimaryDomain" TEXT NOT NULL,
+                        "HealthCheckPath" TEXT NOT NULL,
+                        "HealthCheckTimeoutSeconds" INTEGER NOT NULL,
+                        "RetainHealthyReleasesCount" INTEGER NOT NULL,
+                        "AutoRollbackOnFailure" INTEGER NOT NULL,
+                        "ReleasesRootPath" TEXT NOT NULL,
+                        "PersistentDataPath" TEXT NOT NULL,
+                        "ActiveReleasePath" TEXT NULL,
+                        "LastKnownGoodReleasePath" TEXT NULL,
+                        "LastDeployedCommitSha" TEXT NULL,
+                        "CreatedAtUtc" TEXT NOT NULL,
+                        "UpdatedAtUtc" TEXT NOT NULL,
+                        CONSTRAINT "FK_Applications_Projects_ProjectGroupId" FOREIGN KEY ("ProjectGroupId") REFERENCES "Projects" ("Id") ON DELETE RESTRICT
+                    );
+                    CREATE TABLE "Deployments" (
+                        "Id" TEXT NOT NULL PRIMARY KEY,
+                        "ApplicationId" TEXT NOT NULL,
+                        "ServerId" TEXT NOT NULL,
+                        "State" INTEGER NOT NULL,
+                        "CommitSha" TEXT NOT NULL,
+                        "Branch" TEXT NOT NULL,
+                        "CommitAuthor" TEXT NOT NULL,
+                        "CommitMessage" TEXT NOT NULL,
+                        "ArtifactSha256" TEXT NULL,
+                        "ReleaseDirectory" TEXT NULL,
+                        "PreviousReleaseDirectory" TEXT NULL,
+                        "TriggeredAutomatically" INTEGER NOT NULL,
+                        "ZeroDowntimeAchieved" INTEGER NOT NULL,
+                        "ZeroDowntimeNote" TEXT NULL,
+                        "ErrorSummary" TEXT NULL,
+                        "TriggeredBy" TEXT NOT NULL,
+                        "QueuedAtUtc" TEXT NOT NULL,
+                        "StartedAtUtc" TEXT NULL,
+                        "CompletedAtUtc" TEXT NULL
+                    );
+                    CREATE TABLE "EnvironmentVariables" (
+                        "Id" TEXT NOT NULL PRIMARY KEY,
+                        "ApplicationId" TEXT NOT NULL,
+                        "Tier" INTEGER NOT NULL,
+                        "Key" TEXT NOT NULL,
+                        "IsSecret" INTEGER NOT NULL,
+                        "IsRequired" INTEGER NOT NULL,
+                        "ProtectedValue" TEXT NOT NULL,
+                        "UpdatedAtUtc" TEXT NOT NULL
+                    );
+                    CREATE TABLE "AuditLogs" (
+                        "Id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        "TimestampUtc" TEXT NOT NULL,
+                        "Actor" TEXT NOT NULL,
+                        "Action" TEXT NOT NULL,
+                        "TargetResource" TEXT NOT NULL,
+                        "Outcome" TEXT NOT NULL,
+                        "Details" TEXT NOT NULL,
+                        "ServerId" TEXT NULL,
+                        "ApplicationId" TEXT NULL
+                    );
+                    """;
+                await cmd.ExecuteNonQueryAsync();
+
+                cmd.CommandText = """
+                    INSERT INTO "AdminProfiles" VALUES ($adminId, 'Legacy Operator', 'legacy-admin', 'h', 's', 1, 0, '2026-05-01 12:00:00+02:00');
+                    INSERT INTO "VaultSecrets" VALUES ('github:pat', $encPat, '2026-05-01 12:05:00+02:00');
+                    INSERT INTO "Projects" VALUES ($projectId, 'Legacy Group', 'legacy-group', 'Pre-migration project', '2026-05-01 12:10:00+02:00');
+                    INSERT INTO "Servers" VALUES ($serverId, 'agent-legacy-01', 'Win2022-Prod', '10.20.0.10', 9443, 1, 'PINNED_SERVER_THUMB', 'PINNED_CLIENT_THUMB', 2, 'Win2022', '10.0', '2026-05-02 09:00:00+00:00', '2026-05-01 12:15:00+02:00');
+                    INSERT INTO "Applications" VALUES ($appId, $projectId, $serverId, 'Legacy API', 'legacy-api', 2, 2, 'owner/legacy-api', 'main', '.', 1, 1, 0, 'deploy.yml', '', '', '20', 4050, 'NT SERVICE\SF', 'SF-legacy', 'SF-legacy-Pool', 'SF_legacy', 'legacy.local', '/health', 30, 5, 1, 'C:\Apps\legacy', 'C:\Apps\legacy\data', 'C:\Apps\legacy\r1', 'C:\Apps\legacy\r1', '1111111111111111111111111111111111111111', '2026-05-01 12:20:00+02:00', '2026-05-01 12:25:00+02:00');
+                    INSERT INTO "EnvironmentVariables" VALUES ($envId, $appId, $envTier, 'DB_PASSWORD', 1, 1, $encEnvVal, '2026-05-01 12:30:00+02:00');
+                    -- depOlder: 2026-11-19T10:00:00Z written as +05:00 (lexicographically "15:00" looks larger than "11:00" before UTC normalization!)
+                    INSERT INTO "Deployments" VALUES ($depOlderId, $appId, $serverId, $deployState, '1111111111111111111111111111111111111111', 'main', 'dev', 'older deploy', NULL, NULL, NULL, 1, 1, NULL, NULL, 'ci', '2026-11-19 15:00:00+05:00', '2026-11-19 15:00:05+05:00', '2026-11-19 15:01:00+05:00');
+                    -- depNewer: 2026-11-19T11:00:00Z written as -05:00 (lexicographically "06:00" looks smaller before UTC normalization!)
+                    INSERT INTO "Deployments" VALUES ($depNewerId, $appId, $serverId, $deployState, '2222222222222222222222222222222222222222', 'main', 'dev', 'newer deploy', NULL, NULL, NULL, 1, 1, NULL, NULL, 'ci', '2026-11-19 06:00:00-05:00', '2026-11-19 06:00:05-05:00', '2026-11-19 06:01:00-05:00');
+                    INSERT INTO "AuditLogs" ("TimestampUtc", "Actor", "Action", "TargetResource", "Outcome", "Details") VALUES ('2026-11-19 15:00:00+05:00', 'legacy-admin', 'Legacy.Earlier', 'legacy-api', 'Succeeded', 'earlier');
+                    INSERT INTO "AuditLogs" ("TimestampUtc", "Actor", "Action", "TargetResource", "Outcome", "Details") VALUES ('2026-11-19 06:30:00-05:00', 'legacy-admin', 'Legacy.Later', 'legacy-api', 'Succeeded', 'later');
+                    """;
+                cmd.Parameters.AddWithValue("$adminId", adminId.ToString().ToUpperInvariant());
+                cmd.Parameters.AddWithValue("$encPat", encryptedPat);
+                cmd.Parameters.AddWithValue("$projectId", projectId.ToString().ToUpperInvariant());
+                cmd.Parameters.AddWithValue("$serverId", serverId.ToString().ToUpperInvariant());
+                cmd.Parameters.AddWithValue("$appId", appId.ToString().ToUpperInvariant());
+                cmd.Parameters.AddWithValue("$envId", envVarId.ToString().ToUpperInvariant());
+                cmd.Parameters.AddWithValue("$envTier", (int)EnvironmentTier.Production);
+                cmd.Parameters.AddWithValue("$deployState", (int)DeploymentState.Successful);
+                cmd.Parameters.AddWithValue("$encEnvVal", encryptedEnvVal);
+                cmd.Parameters.AddWithValue("$depOlderId", depOlderId.ToString().ToUpperInvariant());
+                cmd.Parameters.AddWithValue("$depNewerId", depNewerId.ToString().ToUpperInvariant());
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            // 3. Upgrade legacy database safely
+            var legacyOpts = new DbContextOptionsBuilder<ServerForgeDbContext>()
+                .UseSqlite($"Data Source={legacyDbFile}")
+                .Options;
+
+            SqliteMigrationResult migrationResult;
+            await using (var migrateDb = new ServerForgeDbContext(legacyOpts))
+            {
+                migrationResult = await migrateDb.InitializeSqliteAsync();
+                Assert.False(migrationResult.WasFreshDatabase);
+                Assert.Equal(0, migrationResult.PreviousVersion);
+                Assert.Equal(SqliteSchemaMigrator.LatestSchemaVersion, migrationResult.CurrentVersion);
+                Assert.Equal(new[] { 1, 2 }, migrationResult.AppliedVersions);
+                Assert.True(migrationResult.NormalizedTimestampCount >= 10);
+                Assert.NotNull(migrationResult.BackupFilePath);
+                Assert.True(File.Exists(migrationResult.BackupFilePath!));
+                Assert.True(new FileInfo(migrationResult.BackupFilePath!).Length > 0);
+            }
+
+            // 4. Verify EVERY pre-existing record was preserved and sorts accurately in UTC
+            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => new ServerForgeDbContext(legacyOpts));
+            var store = new ServerForgeStore(factoryMock.Object, protector);
+
+            var admin = await store.GetLocalAdminAsync();
+            Assert.NotNull(admin);
+            Assert.Equal("legacy-admin", admin!.Username);
+
+            Assert.Equal("ghp_legacy_secret_value", await store.GetVaultSecretAsync("github:pat"));
+
+            var servers = await store.GetServersAsync();
+            Assert.Single(servers);
+            Assert.Equal("agent-legacy-01", servers[0].AgentId);
+            Assert.Equal("PINNED_SERVER_THUMB", servers[0].PinnedServerCertThumbprint);
+            Assert.Equal("PINNED_CLIENT_THUMB", servers[0].ClientCertThumbprint);
+
+            var apps = await store.GetApplicationsAsync();
+            Assert.Single(apps);
+            Assert.Equal("legacy-api", apps[0].Slug);
+
+            var decryptedEnv = await store.ResolveDecryptedEnvVarsAsync(appId, EnvironmentTier.Production);
+            Assert.Equal("super-db-pass", decryptedEnv["DB_PASSWORD"]);
+
+            var deployments = await store.GetDeploymentHistoryAsync(appId);
+            Assert.Equal(new[] { depNewerId, depOlderId }, deployments.Select(d => d.Id).ToArray());
+
+            var audits = await store.GetRecentAuditLogsAsync(10);
+            Assert.Equal(new[] { "Legacy.Later", "Legacy.Earlier" }, audits.Select(a => a.Action).ToArray());
+
+            // Missing BackupJobs table was safely added during v1 baseline upgrade
+            await store.UpsertBackupJobAsync(new BackupJobRecord
+            {
+                ApplicationId = appId,
+                TargetName = "legacy-api-data",
+                DestinationPath = @"C:\Backups"
+            }, "unit-test");
+            Assert.Single(await store.GetBackupJobsAsync());
+
+            // Re-running InitializeSqliteAsync after upgrade is idempotent (no new backup)
+            await using (var recheckDb = new ServerForgeDbContext(legacyOpts))
+            {
+                var recheck = await recheckDb.InitializeSqliteAsync();
+                Assert.Empty(recheck.AppliedVersions);
+                Assert.Null(recheck.BackupFilePath);
+                Assert.Equal(SqliteSchemaMigrator.LatestSchemaVersion, await SqliteSchemaMigrator.GetSchemaVersionAsync(recheckDb));
+            }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SqliteSchemaMigrator_FailsSafelyAndRollsBackOnCorruptLegacyTimestamp()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-migration-fail-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var corruptDbFile = Path.Combine(tempRoot, "corrupt-legacy.db");
+
+        try
+        {
+            await using (var rawConn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={corruptDbFile};Pooling=False"))
+            {
+                await rawConn.OpenAsync();
+                await using var cmd = rawConn.CreateCommand();
+                cmd.CommandText = """
+                    CREATE TABLE "Servers" (
+                        "Id" TEXT NOT NULL PRIMARY KEY,
+                        "AgentId" TEXT NOT NULL,
+                        "DisplayName" TEXT NOT NULL,
+                        "HostAddress" TEXT NOT NULL,
+                        "AgentPort" INTEGER NOT NULL,
+                        "RequirePrivateNetworkOrVpn" INTEGER NOT NULL,
+                        "PinnedServerCertThumbprint" TEXT NOT NULL,
+                        "ClientCertThumbprint" TEXT NOT NULL,
+                        "Status" INTEGER NOT NULL,
+                        "OsVersion" TEXT NULL,
+                        "IisVersion" TEXT NULL,
+                        "LastSeenUtc" TEXT NULL,
+                        "CreatedAtUtc" TEXT NOT NULL
+                    );
+                    INSERT INTO "Servers" VALUES ('00000000-0000-0000-0000-000000000201', 'agent-ok', 'Valid Server', '10.0.0.1', 9443, 1, 'THUMB1', 'CLIENT1', 2, NULL, NULL, NULL, '2026-05-01 10:00:00+02:00');
+                    INSERT INTO "Servers" VALUES ('00000000-0000-0000-0000-000000000202', 'agent-corrupt', 'Corrupt Row', '10.0.0.2', 9443, 1, 'THUMB2', 'CLIENT2', 2, NULL, NULL, NULL, 'NOT-A-VALID-TIMESTAMP');
+                    """;
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            var opts = new DbContextOptionsBuilder<ServerForgeDbContext>()
+                .UseSqlite($"Data Source={corruptDbFile}")
+                .Options;
+
+            await using (var db = new ServerForgeDbContext(opts))
+            {
+                var ex = await Assert.ThrowsAsync<SqliteMigrationException>(() => db.InitializeSqliteAsync());
+                Assert.NotNull(ex.BackupFilePath);
+                Assert.True(File.Exists(ex.BackupFilePath!));
+                Assert.True(new FileInfo(ex.BackupFilePath!).Length > 0);
+                // Schema version must remain 0 because the transaction rolled back cleanly
+                Assert.Equal(0, await SqliteSchemaMigrator.GetSchemaVersionAsync(db));
+            }
+
+            // Original DB must still exist and row 1 must remain rolled back to its original pre-migration text
+            Assert.True(File.Exists(corruptDbFile));
+            await using (var verifyConn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={corruptDbFile};Pooling=False"))
+            {
+                await verifyConn.OpenAsync();
+                await using var checkCmd = verifyConn.CreateCommand();
+                checkCmd.CommandText = "SELECT \"CreatedAtUtc\" FROM \"Servers\" WHERE \"AgentId\" = 'agent-ok';";
+                Assert.Equal("2026-05-01 10:00:00+02:00", (string?)await checkCmd.ExecuteScalarAsync());
+            }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task GitHubApiClient_RespectsConditionalETag304NotModified()
     {
         var handler = new StubHttpHandler(req =>

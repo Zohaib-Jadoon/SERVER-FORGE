@@ -26,6 +26,12 @@ public sealed class ServerForgeDbContext : DbContext
     public DbSet<BackupJobRecord> BackupJobs => Set<BackupJobRecord>();
     public DbSet<AuditLogRecord> AuditLogs => Set<AuditLogRecord>();
 
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+    {
+        configurationBuilder.Properties<DateTimeOffset>()
+            .HaveConversion<UtcIso8601DateTimeOffsetConverter>();
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<LocalAdminProfile>(e =>
@@ -94,9 +100,6 @@ public sealed class ServerForgeDbContext : DbContext
         });
     }
 
-    public async Task InitializeSqliteAsync(CancellationToken ct = default)
-    {
-        await Database.EnsureCreatedAsync(ct).ConfigureAwait(false);
-        await Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;", ct).ConfigureAwait(false);
-    }
+    public Task<SqliteMigrationResult> InitializeSqliteAsync(CancellationToken ct = default)
+        => SqliteSchemaMigrator.MigrateAsync(this, ct);
 }
