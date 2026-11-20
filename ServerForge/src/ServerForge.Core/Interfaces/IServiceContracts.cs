@@ -21,6 +21,8 @@ public interface IDeploymentStatePersistence
 {
     Task SaveDeploymentSnapshotAsync(DeploymentRecord record, CancellationToken ct = default);
     Task<bool> HasActiveOrSucceededDeploymentForCommitAsync(Guid applicationId, string commitSha, CancellationToken ct = default);
+    Task<bool> HasAttemptedAutonomousDeploymentForCommitAsync(Guid applicationId, string commitSha, CancellationToken ct = default)
+        => HasActiveOrSucceededDeploymentForCommitAsync(applicationId, commitSha, ct);
     Task<int> RecoverInterruptedDeploymentsAsync(CancellationToken ct = default);
 }
 

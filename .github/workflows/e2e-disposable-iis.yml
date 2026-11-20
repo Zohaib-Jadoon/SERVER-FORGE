@@ -1,0 +1,127 @@
+name: Optional Disposable Windows IIS E2E Acceptance (Manual Only)
+
+# PHASE 12J SAFETY NOTICE:
+# - Strictly separated from /.github/workflows/build-windows-installers.yml.
+# - NEVER triggered on push/PR and NEVER deploys to production servers.
+# - Requires explicit operator confirmation (`confirm_disposable_environment=true`)
+#   and a Windows host/runner with Microsoft IIS + .NET 10 Hosting Bundle pre-installed.
+# - Preflight aborts immediately if IIS/AspNetCoreModuleV2 are absent or if production
+#   ServerForgeAgent services exist.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_disposable_environment:
+        description: 'Confirm target runner is a DISPOSABLE Windows IIS test environment (never production)'
+        required: true
+        type: boolean
+        default: false
+      runner_label:
+        description: 'Target runner label (use a self-hosted disposable Windows IIS VM label, e.g., windows-iis-e2e)'
+        required: true
+        type: string
+        default: 'windows-latest'
+      disposable_github_repo:
+        description: 'Optional disposable sample repo (owner/repo) for live GitHub metadata association'
+        required: false
+        type: string
+        default: ''
+      agent_port:
+        description: 'Isolated loopback Agent port (127.0.0.1)'
+        required: false
+        type: string
+        default: '19443'
+      app_port:
+        description: 'Isolated loopback IIS app port (127.0.0.1)'
+        required: false
+        type: string
+        default: '15199'
+
+jobs:
+  disposable-iis-e2e:
+    name: Disposable Windows IIS End-to-End Acceptance
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Enforce Explicit Disposable Environment Confirmation
+        shell: pwsh
+        run: |
+          if ('${{ inputs.confirm_disposable_environment }}' -ne 'true') {
+            Write-Error 'Refusing to run: confirm_disposable_environment must be explicitly set to true.'
+            exit 1
+          }
+          Write-Host "Confirmed disposable E2E execution on runner label: ${{ inputs.runner_label }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 LTS SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build Agent Installer for Disposable Test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./ServerForge/scripts/build-windows.ps1 -Configuration Release -SkipTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue) -and
+              -not (Test-Path 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe')) {
+            choco install innosetup --no-progress -y
+          }
+          & ./ServerForge/scripts/build-installers.ps1 -SkipBuild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run Phase 12 Preflight, Disposable IIS Setup, Deploy, Update & Rollback
+        id: e2e
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runId = "gh$env:GITHUB_RUN_ID"
+          $workspaceRoot = Join-Path 'C:\Temp' "ServerForge_E2E_$runId"
+          $agentInstaller = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\installers\ServerForge-Agent-Setup.exe'
+          $evidenceOut = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\e2e-evidence'
+          New-Item -ItemType Directory -Path $evidenceOut -Force | Out-Null
+
+          "E2E_RUN_ID=$runId" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding UTF8
+          "E2E_WORKSPACE=$workspaceRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding UTF8
+          "E2E_EVIDENCE=$evidenceOut" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding UTF8
+
+          & ./ServerForge/scripts/e2e/setup-disposable-iis.ps1 `
+            -RunId $runId `
+            -AgentInstallerPath $agentInstaller `
+            -WorkspaceRoot $workspaceRoot `
+            -AgentPort ([int]'${{ inputs.agent_port }}') `
+            -AppPort ([int]'${{ inputs.app_port }}')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $manifestPath = Join-Path $workspaceRoot 'e2e-manifest.json'
+          & ./ServerForge/scripts/e2e/run-deployment-tests.ps1 `
+            -ManifestPath $manifestPath `
+            -GitHubRepo '${{ inputs.disposable_github_repo }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          & ./ServerForge/scripts/e2e/verify-rollback.ps1 `
+            -ManifestPath $manifestPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect Sanitized Diagnostics & Clean Up Owned Disposable Resources
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:E2E_WORKSPACE) -and (Test-Path $env:E2E_WORKSPACE)) {
+            & ./ServerForge/scripts/e2e/cleanup-disposable-iis.ps1 `
+              -WorkspaceRoot $env:E2E_WORKSPACE `
+              -PreserveDiagnosticsDir $env:E2E_EVIDENCE
+          }
+
+      - name: Upload Sanitized E2E Evidence & Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverforge-e2e-iis-evidence-${{ github.run_id }}
+          path: ServerForge/artifacts/e2e-evidence/**/*
+          if-no-files-found: warn
+          retention-days: 14

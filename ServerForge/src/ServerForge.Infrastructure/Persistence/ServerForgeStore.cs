@@ -526,6 +526,22 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
              d.State == DeploymentState.Verifying), ct);
     }
 
+    public async Task<bool> HasAttemptedAutonomousDeploymentForCommitAsync(Guid applicationId, string commitSha, CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.Deployments.AnyAsync(d =>
+            d.ApplicationId == applicationId &&
+            d.CommitSha == commitSha &&
+            (d.State == DeploymentState.Successful ||
+             d.State == DeploymentState.Queued ||
+             d.State == DeploymentState.Fetching ||
+             d.State == DeploymentState.Building ||
+             d.State == DeploymentState.Staging ||
+             d.State == DeploymentState.Deploying ||
+             d.State == DeploymentState.Verifying ||
+             (d.TriggeredAutomatically && (d.State == DeploymentState.Failed || d.State == DeploymentState.RolledBack))), ct);
+    }
+
     /// <summary>
     /// Marks any non-terminal deployments left behind by an unexpected Agent restart as Failed
     /// so operators see accurate recovery status and the queue is never stuck.

@@ -91,6 +91,7 @@ public static class AgentHostFactory
         bool enableWindowsService = true,
         bool enableAutoDeployWorker = true,
         bool configureSerilog = true,
+        Action<IServiceCollection>? configureTestServices = null,
         CancellationToken cancellationToken = default)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -246,6 +247,8 @@ public static class AgentHostFactory
 
         if (enableAutoDeployWorker)
             builder.Services.AddHostedService<GitHubAutoDeployWorker>();
+
+        configureTestServices?.Invoke(builder.Services);
 
         var app = builder.Build();
 

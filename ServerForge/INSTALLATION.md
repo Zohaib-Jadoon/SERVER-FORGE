@@ -107,3 +107,8 @@ Unattended GitHub Actions `windows-latest` runners verify installer execution, s
 - [ ] **NOT VERIFIED** — Click window Close (`X`) -> verify app minimizes to system tray -> double-click tray icon to reopen -> right-click tray icon -> Exit cleanly.
 - [ ] **NOT VERIFIED** — Pair a live disposable Windows Server Agent over private VPN -> restart Desktop -> confirm automatic mTLS reconnection without re-pairing.
 - [ ] **NOT VERIFIED** — Complete the 20-step disposable E2E deployment & rollback runbook in `/ServerForge/samples/disposable-test-app/README.md`.
+
+### Phase 12 Acceptance Guides & Evidence Templates
+- **Full 13-Screen Interactive Windows 11 WPF Runbook**: `/ServerForge/WINDOWS_DESKTOP_ACCEPTANCE.md`
+- **Reproducible Disposable Windows IIS E2E Harness Guide**: `/ServerForge/DISPOSABLE_IIS_TEST_GUIDE.md`
+- **Current Acceptance Evidence Matrix**: `/ServerForge/E2E_ACCEPTANCE_REPORT.md`

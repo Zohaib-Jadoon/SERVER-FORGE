@@ -48,6 +48,14 @@ Invoke-CheckedCommand -FilePath "dotnet" -Arguments @(
     "--no-restore"
 ) -StepName "Building ServerForge.sln ($Configuration)"
 
+$SampleCsproj = Join-Path $Root "samples\disposable-test-app\ServerForge.SampleApp.csproj"
+if (Test-Path $SampleCsproj) {
+    Invoke-CheckedCommand -FilePath "dotnet" -Arguments @(
+        "build", $SampleCsproj,
+        "--configuration", $Configuration
+    ) -StepName "Building Disposable E2E Sample App (ServerForge.SampleApp.csproj)"
+}
+
 if (-not $SkipTests) {
     $testArgs = @(
         "test", $Solution,

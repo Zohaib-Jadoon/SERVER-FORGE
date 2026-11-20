@@ -1,3 +1,4 @@
+using System.Xml.Linq;
 using ServerForge.Contracts.Dtos;
 using ServerForge.Contracts.Enums;
 using ServerForge.Core.Entities;
@@ -211,7 +212,15 @@ public sealed class AspNetCoreDeploymentAdapter : IAppDeploymentAdapter
         Action<string> log,
         CancellationToken ct)
     {
-        log($"Deploying ASP.NET Core release to IIS site '{app.IisSiteName}'");
+        var mergedEnv = new Dictionary<string, string>(envVars, StringComparer.Ordinal);
+        if (!mergedEnv.ContainsKey("ASPNETCORE_ENVIRONMENT"))
+            mergedEnv["ASPNETCORE_ENVIRONMENT"] = "Production";
+        if (!mergedEnv.ContainsKey("PERSISTENT_DATA_DIR") && !string.IsNullOrWhiteSpace(app.PersistentDataPath))
+            mergedEnv["PERSISTENT_DATA_DIR"] = app.PersistentDataPath;
+
+        ApplyAspNetCoreWebConfigEnvironmentVariables(stagedReleaseDir, mergedEnv);
+
+        log($"Deploying ASP.NET Core release to IIS site '{app.IisSiteName}' ({mergedEnv.Count} runtime environment variable(s) applied to web.config)");
         await _iis.EnsureManagedSiteAndPoolAsync(app, stagedReleaseDir, ct).ConfigureAwait(false);
         await _iis.SwitchSitePhysicalPathAsync(app, stagedReleaseDir, ct).ConfigureAwait(false);
         return new AdapterDeployResult(true, true, ZeroDowntimeExplanation, null);
@@ -219,8 +228,96 @@ public sealed class AspNetCoreDeploymentAdapter : IAppDeploymentAdapter
 
     public Task RollbackReleaseAsync(ManagedApplication app, string previousHealthyReleaseDir, Action<string> log, CancellationToken ct)
     {
-        log($"Rolling back ASP.NET Core IIS site '{app.IisSiteName}' to '{previousHealthyReleaseDir}'");
+        log($"Rolling back ASP.NET Core IIS site '{app.IisSiteName}' to '{previousHealthyReleaseDir}' (restoring previous release binaries and web.config)");
         return _iis.SwitchSitePhysicalPathAsync(app, previousHealthyReleaseDir, ct);
+    }
+
+    /// <summary>
+    /// Ensures staged ASP.NET Core releases have an IIS AspNetCoreModuleV2 web.config containing
+    /// the release's exact runtime environment variables. Because each release directory is immutable,
+    /// rolling back to a previous release directory automatically restores its healthy configuration.
+    /// </summary>
+    public static void ApplyAspNetCoreWebConfigEnvironmentVariables(
+        string stagedReleaseDir,
+        IReadOnlyDictionary<string, string> envVars)
+    {
+        var webConfigPath = Path.Combine(stagedReleaseDir, "web.config");
+        XDocument doc;
+
+        if (File.Exists(webConfigPath))
+        {
+            doc = XDocument.Load(webConfigPath);
+        }
+        else
+        {
+            var exeFile = Directory.GetFiles(stagedReleaseDir, "*.exe", SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFileName)
+                .FirstOrDefault(n => !string.IsNullOrWhiteSpace(n) && !n.Equals("createdump.exe", StringComparison.OrdinalIgnoreCase));
+
+            var dllFile = Directory.GetFiles(stagedReleaseDir, "*.dll", SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFileName)
+                .FirstOrDefault();
+
+            var processPath = !string.IsNullOrWhiteSpace(exeFile) ? $".\\{exeFile}" : "dotnet";
+            var arguments = !string.IsNullOrWhiteSpace(exeFile) ? "" : $".\\{dllFile}";
+
+            var aspNetCoreEl = new XElement("aspNetCore",
+                new XAttribute("processPath", processPath),
+                new XAttribute("stdoutLogEnabled", "false"),
+                new XAttribute("stdoutLogFile", @".\logs\stdout"),
+                new XAttribute("hostingModel", "inprocess"));
+            if (!string.IsNullOrEmpty(arguments))
+                aspNetCoreEl.Add(new XAttribute("arguments", arguments));
+
+            doc = new XDocument(
+                new XDeclaration("1.0", "utf-8", null),
+                new XElement("configuration",
+                    new XElement("location",
+                        new XAttribute("path", "."),
+                        new XAttribute("inheritInChildApplications", "false"),
+                        new XElement("system.webServer",
+                            new XElement("handlers",
+                                new XElement("add",
+                                    new XAttribute("name", "aspNetCore"),
+                                    new XAttribute("path", "*"),
+                                    new XAttribute("verb", "*"),
+                                    new XAttribute("modules", "AspNetCoreModuleV2"),
+                                    new XAttribute("resourceType", "Unspecified"))),
+                            aspNetCoreEl))));
+        }
+
+        var aspNetCore = doc.Descendants("aspNetCore").FirstOrDefault();
+        if (aspNetCore is null)
+            return;
+
+        if (envVars.Count > 0)
+        {
+            var envContainer = aspNetCore.Element("environmentVariables");
+            if (envContainer is null)
+            {
+                envContainer = new XElement("environmentVariables");
+                aspNetCore.Add(envContainer);
+            }
+
+            foreach (var (key, value) in envVars.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+            {
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                var existing = envContainer.Elements("environmentVariable")
+                    .FirstOrDefault(e => string.Equals((string?)e.Attribute("name"), key, StringComparison.OrdinalIgnoreCase));
+                if (existing is not null)
+                {
+                    existing.SetAttributeValue("value", value);
+                }
+                else
+                {
+                    envContainer.Add(new XElement("environmentVariable",
+                        new XAttribute("name", key),
+                        new XAttribute("value", value)));
+                }
+            }
+        }
+
+        doc.Save(webConfigPath);
     }
 }
 

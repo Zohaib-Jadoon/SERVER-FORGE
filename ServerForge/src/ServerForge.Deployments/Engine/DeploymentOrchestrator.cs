@@ -134,9 +134,9 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
         {
             if (request.TriggeredAutomatically && _persistence is not null)
             {
-                if (await _persistence.HasActiveOrSucceededDeploymentForCommitAsync(application.Id, deployment.CommitSha, linkedCts.Token))
+                if (await _persistence.HasAttemptedAutonomousDeploymentForCommitAsync(application.Id, deployment.CommitSha, linkedCts.Token))
                 {
-                    deployment.ErrorSummary = $"Commit {deployment.CommitSha[..8]} was already deployed or is in progress; duplicate auto-deploy skipped.";
+                    deployment.ErrorSummary = $"Commit {deployment.CommitSha[..8]} was already deployed, is in progress, or previously failed autonomous deployment; skipping to prevent duplicate/endless retry loops.";
                     deployment.CompletedAtUtc = DateTimeOffset.UtcNow;
                     await EmitAsync(DeploymentState.Cancelled, deployment.ErrorSummary);
                     return deployment;
@@ -431,9 +431,7 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
         if (string.IsNullOrWhiteSpace(app.HealthCheckPath))
             return false; // Require an explicit readiness path rather than blindly assuming healthy
 
-        var probeUrl = ApplicationConfigValidator.RequiresInternalPort(app.RuntimeType)
-            ? $"http://127.0.0.1:{app.InternalPort}/{app.HealthCheckPath.TrimStart('/')}"
-            : $"http://{app.PrimaryDomain}/{app.HealthCheckPath.TrimStart('/')}";
+        var probeUrl = ResolveHealthCheckUrl(app);
 
         var deadline = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(app.HealthCheckTimeoutSeconds, 3, 180));
         while (DateTimeOffset.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -453,6 +451,26 @@ public sealed partial class DeploymentOrchestrator : IDeploymentEngine
         }
 
         return false;
+    }
+
+    public static string ResolveHealthCheckUrl(ManagedApplication app)
+    {
+        var path = app.HealthCheckPath.TrimStart('/');
+        if (ApplicationConfigValidator.RequiresInternalPort(app.RuntimeType))
+            return $"http://127.0.0.1:{app.InternalPort}/{path}";
+
+        if (app.InternalPort is >= 1024 and <= 65535)
+        {
+            if (string.IsNullOrWhiteSpace(app.PrimaryDomain) ||
+                app.PrimaryDomain.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"http://127.0.0.1:{app.InternalPort}/{path}";
+            }
+
+            return $"http://{app.PrimaryDomain.Trim()}:{app.InternalPort}/{path}";
+        }
+
+        return $"http://{app.PrimaryDomain.Trim()}/{path}";
     }
 
     private int ExtractZipSafely(string zipPath, string destinationRoot)

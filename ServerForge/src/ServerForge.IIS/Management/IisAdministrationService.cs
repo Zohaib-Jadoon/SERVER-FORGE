@@ -189,7 +189,7 @@ public sealed class IisAdministrationService : IIisManager
         var siteCheck = await SafeProcessRunner.RunAsync(appCmd, ["list", "site", app.IisSiteName], cancellationToken: ct);
         if (siteCheck.ExitCode != 0)
         {
-            var binding = string.IsNullOrWhiteSpace(app.PrimaryDomain) ? "http/*:80:" : $"http/*:80:{app.PrimaryDomain}";
+            var binding = ResolveSiteBinding(app);
             var addSite = await SafeProcessRunner.RunAsync(
                 appCmd,
                 ["add", "site", $"/name:{app.IisSiteName}", $"/bindings:{binding}", $"/physicalPath:{safePath}"],
@@ -201,10 +201,31 @@ public sealed class IisAdministrationService : IIisManager
                 appCmd,
                 ["set", "app", $"{app.IisSiteName}/", $"/applicationPool:{app.IisAppPoolName}"],
                 cancellationToken: ct);
+
+            await SafeProcessRunner.RunAsync(
+                appCmd,
+                ["start", "site", app.IisSiteName],
+                cancellationToken: ct);
         }
 
         _managedSiteNames.Add(app.IisSiteName);
         _logger.LogInformation("Verified managed IIS website {Site} and AppPool {Pool}", app.IisSiteName, app.IisAppPoolName);
+    }
+
+    public static string ResolveSiteBinding(ManagedApplication app)
+    {
+        var directPort = !Core.Validation.ApplicationConfigValidator.RequiresInternalPort(app.RuntimeType) &&
+                         app.InternalPort is >= 1024 and <= 65535
+            ? app.InternalPort
+            : 80;
+
+        if (string.IsNullOrWhiteSpace(app.PrimaryDomain) ||
+            app.PrimaryDomain.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return directPort == 80 ? "http/*:80:" : $"http/127.0.0.1:{directPort}:";
+        }
+
+        return $"http/*:{directPort}:{app.PrimaryDomain.Trim()}";
     }
 
     public async Task SwitchSitePhysicalPathAsync(ManagedApplication app, string newReleasePath, CancellationToken ct)
@@ -220,6 +241,15 @@ public sealed class IisAdministrationService : IIisManager
 
         if (res.ExitCode != 0)
             throw new InvalidOperationException($"Failed switching IIS physical path for '{app.IisSiteName}': {res.StandardError}");
+
+        if (app.RuntimeType == ApplicationRuntimeType.AspNetCore && !string.IsNullOrWhiteSpace(app.IisAppPoolName))
+        {
+            // Trigger graceful overlapped AppPool recycle so AspNetCoreModuleV2 loads the new release + web.config immediately
+            await SafeProcessRunner.RunAsync(
+                appCmd,
+                ["recycle", "apppool", $"/apppool.name:{app.IisAppPoolName}"],
+                cancellationToken: ct);
+        }
     }
 
     public async Task ConfigureReverseProxyWebConfigAsync(ManagedApplication app, string siteRootPath, CancellationToken ct)

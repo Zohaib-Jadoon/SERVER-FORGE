@@ -1110,6 +1110,181 @@ public sealed class DeploymentAndPersistenceTests
         Assert.Equal(4999, check.RateLimitRemaining);
     }
 
+    [Fact]
+    public async Task AspNetCoreDeploymentAdapter_AppliesEnvVarsToWebConfig_AndPreservesPreviousReleaseOnRollback()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-aspnetcore-webcfg-{Guid.NewGuid():N}");
+        var release1 = Path.Combine(tempRoot, "releases", "r1");
+        var release2 = Path.Combine(tempRoot, "releases", "r2");
+        Directory.CreateDirectory(release1);
+        Directory.CreateDirectory(release2);
+        await File.WriteAllTextAsync(Path.Combine(release1, "ServerForge.SampleApp.exe"), "stub-exe");
+        await File.WriteAllTextAsync(Path.Combine(release2, "ServerForge.SampleApp.exe"), "stub-exe");
+
+        try
+        {
+            var iisMock = new Mock<IIisManager>();
+            var activePath = string.Empty;
+            iisMock.Setup(m => m.EnsureManagedSiteAndPoolAsync(It.IsAny<ManagedApplication>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+            iisMock.Setup(m => m.SwitchSitePhysicalPathAsync(It.IsAny<ManagedApplication>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Callback<ManagedApplication, string, CancellationToken>((_, p, _) => activePath = p)
+                .Returns(Task.CompletedTask);
+
+            var adapter = new AspNetCoreDeploymentAdapter(iisMock.Object);
+            var app = new ManagedApplication
+            {
+                ProjectGroupId = Guid.NewGuid(),
+                Name = "Sample E2E",
+                Slug = "sample-e2e",
+                RuntimeType = ApplicationRuntimeType.AspNetCore,
+                ManagementState = ResourceManagementState.ServerForgeCreated,
+                IisSiteName = "ServerForge_E2E_01",
+                IisAppPoolName = "ServerForge_E2E_01_Pool",
+                InternalPort = 5199,
+                PrimaryDomain = "localhost",
+                ReleasesRootPath = tempRoot,
+                PersistentDataPath = Path.Combine(tempRoot, "data")
+            };
+
+            var res1 = await adapter.DeployStagedReleaseAsync(
+                app,
+                release1,
+                new Dictionary<string, string> { ["APP_VERSION"] = "1.0.0", ["SIMULATE_UNHEALTHY"] = "false" },
+                _ => { },
+                CancellationToken.None);
+            Assert.True(res1.Succeeded);
+            Assert.Equal(release1, activePath);
+
+            var r1Config = await File.ReadAllTextAsync(Path.Combine(release1, "web.config"));
+            Assert.Contains("AspNetCoreModuleV2", r1Config);
+            Assert.Contains("name=\"APP_VERSION\" value=\"1.0.0\"", r1Config);
+            Assert.Contains("name=\"PERSISTENT_DATA_DIR\"", r1Config);
+
+            var res2 = await adapter.DeployStagedReleaseAsync(
+                app,
+                release2,
+                new Dictionary<string, string> { ["APP_VERSION"] = "1.0.1-bad", ["SIMULATE_UNHEALTHY"] = "true" },
+                _ => { },
+                CancellationToken.None);
+            Assert.True(res2.Succeeded);
+            Assert.Equal(release2, activePath);
+            Assert.Contains("name=\"SIMULATE_UNHEALTHY\" value=\"true\"", await File.ReadAllTextAsync(Path.Combine(release2, "web.config")));
+
+            // Rollback switches IIS back to immutable release1 whose web.config still holds healthy 1.0.0 settings
+            await adapter.RollbackReleaseAsync(app, release1, _ => { }, CancellationToken.None);
+            Assert.Equal(release1, activePath);
+            var r1ConfigAfterRollback = await File.ReadAllTextAsync(Path.Combine(release1, "web.config"));
+            Assert.Contains("name=\"APP_VERSION\" value=\"1.0.0\"", r1ConfigAfterRollback);
+            Assert.Contains("name=\"SIMULATE_UNHEALTHY\" value=\"false\"", r1ConfigAfterRollback);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void IisAdministrationService_ResolveSiteBinding_AndHealthProbe_UseIsolatedLoopbackPort()
+    {
+        var disposableApp = new ManagedApplication
+        {
+            RuntimeType = ApplicationRuntimeType.AspNetCore,
+            PrimaryDomain = "localhost",
+            InternalPort = 5199,
+            HealthCheckPath = "/health"
+        };
+        Assert.Equal("http/127.0.0.1:5199:", IisAdministrationService.ResolveSiteBinding(disposableApp));
+        Assert.Equal("http://127.0.0.1:5199/health", DeploymentOrchestrator.ResolveHealthCheckUrl(disposableApp));
+
+        var domainApp = new ManagedApplication
+        {
+            RuntimeType = ApplicationRuntimeType.AspNetCore,
+            PrimaryDomain = "sample.example.com",
+            InternalPort = 0,
+            HealthCheckPath = "/health"
+        };
+        Assert.Equal("http/*:80:sample.example.com", IisAdministrationService.ResolveSiteBinding(domainApp));
+        Assert.Equal("http://sample.example.com/health", DeploymentOrchestrator.ResolveHealthCheckUrl(domainApp));
+
+        var proxyApp = new ManagedApplication
+        {
+            RuntimeType = ApplicationRuntimeType.NestJsApi,
+            PrimaryDomain = "api.example.com",
+            InternalPort = 4010,
+            HealthCheckPath = "/health"
+        };
+        Assert.Equal("http/*:80:api.example.com", IisAdministrationService.ResolveSiteBinding(proxyApp));
+        Assert.Equal("http://127.0.0.1:4010/health", DeploymentOrchestrator.ResolveHealthCheckUrl(proxyApp));
+    }
+
+    [Fact]
+    public async Task GitHubApiClient_RejectsBadWorkflowConclusion_ExpiredArtifact_HashMismatch_AndApiOutage()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-gh-neg-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            // 1. Unavailable GitHub API (HTTP 503)
+            var outageClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable))),
+                NullLogger<GitHubApiClient>.Instance);
+            var outageRes = await outageClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "outage.zip"), CancellationToken.None);
+            Assert.False(outageRes.Found);
+            Assert.Contains("503", outageRes.ErrorMessage ?? "");
+
+            // 2. Bad workflow conclusion ("failure")
+            var badConclusionClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent($$"""{"workflow_runs":[{"id":901,"conclusion":"failure","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""")
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var badConclusionRes = await badConclusionClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "bad.zip"), CancellationToken.None);
+            Assert.False(badConclusionRes.Found);
+
+            // 3. Expired artifact
+            var expiredClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":902,"conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"artifacts":[{"id":77,"name":"app","expired":true,"size_in_bytes":2048,"digest":"sha256:aaaa","archive_download_url":"https://api.github.com/dl/77"}]}""") };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var expiredRes = await expiredClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "exp.zip"), CancellationToken.None);
+            Assert.False(expiredRes.Found);
+            Assert.Contains("non-expired", expiredRes.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 4. Artifact SHA-256 hash mismatch -> deleted & rejected
+            var mismatchZipPath = Path.Combine(tempRoot, "mismatch.zip");
+            var mismatchClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":903,"conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    if (uri.Contains("/artifacts"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"artifacts":[{"id":88,"name":"app","expired":false,"size_in_bytes":16,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","archive_download_url":"https://api.github.com/dl/88"}]}""") };
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3, 4, 5, 6]) };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var mismatchRes = await mismatchClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", mismatchZipPath, CancellationToken.None);
+            Assert.False(mismatchRes.Found);
+            Assert.Contains("mismatch", mismatchRes.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(mismatchZipPath));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
     private static ManagedApplication CreateStaticApp(string tempRoot) => new()
     {
         ProjectGroupId = Guid.NewGuid(),

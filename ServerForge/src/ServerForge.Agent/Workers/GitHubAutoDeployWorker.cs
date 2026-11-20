@@ -91,78 +91,90 @@ public sealed class GitHubAutoDeployWorker : BackgroundService
 
         foreach (var app in eligible)
         {
-            _etagCache.TryGetValue(app.Id, out var lastETag);
-            var head = await _github.CheckBranchHeadConditionalAsync(pat, app.RepositoryFullName, app.Branch, lastETag, ct);
-
-            if (!string.IsNullOrWhiteSpace(head.ETag))
-                _etagCache[app.Id] = head.ETag;
-
-            if (!head.Modified || string.IsNullOrWhiteSpace(head.LatestCommitSha))
-                continue;
-
-            if (string.Equals(app.LastDeployedCommitSha, head.LatestCommitSha, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            // Persistent duplicate-commit guard across Agent restarts
-            if (await _store.HasActiveOrSucceededDeploymentForCommitAsync(app.Id, head.LatestCommitSha, ct))
-                continue;
-
-            _logger.LogInformation("Detected new commit {Sha} on {Repo}:{Branch} for {App}. Verifying workflow artifact.",
-                head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], app.RepositoryFullName, app.Branch, app.Name);
-
-            string? localArtifactZip = null;
-            string? trustedDigest = null;
-            long? workflowRunId = null;
-            long? artifactId = null;
-            string? artifactName = null;
-            string? trustSource = null;
-
-            if (app.SourceMode == DeploymentSourceMode.GitHubActionsArtifact)
+            try
             {
-                var artifactPath = Path.Combine(_options.DataRoot, "artifacts", app.Slug, $"{head.LatestCommitSha}.zip");
-                var dl = await _github.DownloadVerifiedWorkflowArtifactAsync(
-                    pat,
-                    app.RepositoryFullName,
-                    app.Branch,
-                    head.LatestCommitSha,
-                    app.GitHubWorkflowFileName,
-                    artifactPath,
-                    ct);
+                _etagCache.TryGetValue(app.Id, out var lastETag);
+                var head = await _github.CheckBranchHeadConditionalAsync(pat, app.RepositoryFullName, app.Branch, lastETag, ct);
 
-                if (!dl.Found || string.IsNullOrWhiteSpace(dl.TrustedApiDigestSha256))
-                {
-                    _logger.LogInformation("Waiting for verified GitHub Actions artifact for {App}@{Sha}: {Reason}",
-                        app.Slug, head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], dl.ErrorMessage);
+                if (!string.IsNullOrWhiteSpace(head.ETag))
+                    _etagCache[app.Id] = head.ETag;
+
+                if (!head.Modified || string.IsNullOrWhiteSpace(head.LatestCommitSha))
                     continue;
+
+                if (string.Equals(app.LastDeployedCommitSha, head.LatestCommitSha, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Persistent duplicate-commit & anti-retry-loop guard across Agent restarts
+                if (await _store.HasAttemptedAutonomousDeploymentForCommitAsync(app.Id, head.LatestCommitSha, ct))
+                    continue;
+
+                _logger.LogInformation("Detected new commit {Sha} on {Repo}:{Branch} for {App}. Verifying workflow artifact.",
+                    head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], app.RepositoryFullName, app.Branch, app.Name);
+
+                string? localArtifactZip = null;
+                string? trustedDigest = null;
+                long? workflowRunId = null;
+                long? artifactId = null;
+                string? artifactName = null;
+                string? trustSource = null;
+
+                if (app.SourceMode == DeploymentSourceMode.GitHubActionsArtifact)
+                {
+                    var artifactPath = Path.Combine(_options.DataRoot, "artifacts", app.Slug, $"{head.LatestCommitSha}.zip");
+                    var dl = await _github.DownloadVerifiedWorkflowArtifactAsync(
+                        pat,
+                        app.RepositoryFullName,
+                        app.Branch,
+                        head.LatestCommitSha,
+                        app.GitHubWorkflowFileName,
+                        artifactPath,
+                        ct);
+
+                    if (!dl.Found || string.IsNullOrWhiteSpace(dl.TrustedApiDigestSha256))
+                    {
+                        _logger.LogInformation("Waiting for verified GitHub Actions artifact for {App}@{Sha}: {Reason}",
+                            app.Slug, head.LatestCommitSha[..Math.Min(7, head.LatestCommitSha.Length)], dl.ErrorMessage);
+                        continue;
+                    }
+
+                    localArtifactZip = dl.LocalZipPath;
+                    trustedDigest = dl.TrustedApiDigestSha256;
+                    workflowRunId = dl.WorkflowRunId;
+                    artifactId = dl.ArtifactId;
+                    artifactName = dl.ArtifactName;
+                    trustSource = dl.TrustSource;
                 }
 
-                localArtifactZip = dl.LocalZipPath;
-                trustedDigest = dl.TrustedApiDigestSha256;
-                workflowRunId = dl.WorkflowRunId;
-                artifactId = dl.ArtifactId;
-                artifactName = dl.ArtifactName;
-                trustSource = dl.TrustSource;
+                var envVars = await _store.ResolveDecryptedEnvVarsAsync(app.Id, EnvironmentTier.Production, ct);
+                var trigger = new TriggerDeploymentRequest(
+                    ApplicationId: app.Id,
+                    CommitSha: head.LatestCommitSha,
+                    Branch: app.Branch,
+                    CommitMessage: head.CommitMessage,
+                    CommitAuthor: head.CommitAuthor,
+                    ArtifactDownloadUrl: localArtifactZip,
+                    ExpectedArtifactSha256: trustedDigest,
+                    TriggeredAutomatically: true,
+                    RequestedBy: "ServerForge.Agent.AutoDeploy",
+                    VerifiedWorkflowRunId: workflowRunId,
+                    VerifiedArtifactId: artifactId,
+                    VerifiedArtifactName: artifactName,
+                    ArtifactTrustSource: trustSource);
+
+                var record = await _deploymentEngine.EnqueueAndExecuteAsync(app, trigger, envVars, cancellationToken: ct);
+                await _store.RecordDeploymentAsync(record, ct);
+                await _store.UpsertApplicationAsync(app, "ServerForge.Agent.AutoDeploy", ct);
             }
-
-            var envVars = await _store.ResolveDecryptedEnvVarsAsync(app.Id, EnvironmentTier.Production, ct);
-            var trigger = new TriggerDeploymentRequest(
-                ApplicationId: app.Id,
-                CommitSha: head.LatestCommitSha,
-                Branch: app.Branch,
-                CommitMessage: head.CommitMessage,
-                CommitAuthor: head.CommitAuthor,
-                ArtifactDownloadUrl: localArtifactZip,
-                ExpectedArtifactSha256: trustedDigest,
-                TriggeredAutomatically: true,
-                RequestedBy: "ServerForge.Agent.AutoDeploy",
-                VerifiedWorkflowRunId: workflowRunId,
-                VerifiedArtifactId: artifactId,
-                VerifiedArtifactName: artifactName,
-                ArtifactTrustSource: trustSource);
-
-            var record = await _deploymentEngine.EnqueueAndExecuteAsync(app, trigger, envVars, cancellationToken: ct);
-            await _store.RecordDeploymentAsync(record, ct);
-            await _store.UpsertApplicationAsync(app, "ServerForge.Agent.AutoDeploy", ct);
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Autonomous poll failed safely for {App} ({Repo}:{Branch}); continuing remaining applications.",
+                    app.Slug, app.RepositoryFullName, app.Branch);
+            }
         }
     }
 }
