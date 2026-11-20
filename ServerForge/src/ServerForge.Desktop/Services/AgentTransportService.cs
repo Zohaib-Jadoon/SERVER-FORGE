@@ -30,15 +30,20 @@ public sealed class DesktopIdentityService
 
     public X509Certificate2 LoadOrCreateClientCertificate()
     {
-        if (File.Exists(_pfxPath))
-            return X509CertificateLoader.LoadPkcs12FromFile(_pfxPath, password: null);
+        const X509KeyStorageFlags storageFlags =
+            X509KeyStorageFlags.UserKeySet |
+            X509KeyStorageFlags.PersistKeySet |
+            X509KeyStorageFlags.Exportable;
 
-        var cert = MutualTlsCertificateManager.CreateSelfSignedIdentityCertificate(
+        if (File.Exists(_pfxPath))
+            return X509CertificateLoader.LoadPkcs12FromFile(_pfxPath, password: null, storageFlags);
+
+        using var ephemeralCert = MutualTlsCertificateManager.CreateSelfSignedIdentityCertificate(
             commonName: $"ServerForgeDesktop-{Environment.MachineName}",
             isServerCertificate: false);
 
-        File.WriteAllBytes(_pfxPath, cert.Export(X509ContentType.Pfx));
-        return cert;
+        File.WriteAllBytes(_pfxPath, ephemeralCert.Export(X509ContentType.Pfx));
+        return X509CertificateLoader.LoadPkcs12FromFile(_pfxPath, password: null, storageFlags);
     }
 
     /// <summary>
@@ -88,12 +93,14 @@ public sealed class AgentTransportService
         CancellationToken ct)
     {
         using var clientCert = _identity.LoadOrCreateClientCertificate();
-        using var handler = new HttpClientHandler();
+        using var handler = new HttpClientHandler
+        {
+            ClientCertificateOptions = ClientCertificateOption.Manual
+        };
         handler.ClientCertificates.Add(clientCert);
         handler.ServerCertificateCustomValidationCallback = (_, cert, _, _) =>
             cert is not null &&
-            MutualTlsCertificateManager.VerifyPinnedCertificateThumbprint(
-                new X509Certificate2(cert), expectedAgentThumbprint);
+            MutualTlsCertificateManager.VerifyPinnedCertificateThumbprint(cert, expectedAgentThumbprint);
 
         using var http = new HttpClient(handler) { BaseAddress = new Uri($"https://{hostAddress}:{port}/"), Timeout = TimeSpan.FromSeconds(15) };
         var request = new PairingInitRequest(
@@ -249,12 +256,14 @@ public sealed class AgentTransportService
     private HttpClient CreatePinnedClient(ManagedServer server)
     {
         var clientCert = _identity.LoadOrCreateClientCertificate();
-        var handler = new HttpClientHandler();
+        var handler = new HttpClientHandler
+        {
+            ClientCertificateOptions = ClientCertificateOption.Manual
+        };
         handler.ClientCertificates.Add(clientCert);
         handler.ServerCertificateCustomValidationCallback = (_, cert, _, _) =>
             cert is not null &&
-            MutualTlsCertificateManager.VerifyPinnedCertificateThumbprint(
-                new X509Certificate2(cert), server.PinnedServerCertThumbprint);
+            MutualTlsCertificateManager.VerifyPinnedCertificateThumbprint(cert, server.PinnedServerCertThumbprint);
 
         return new HttpClient(handler)
         {

@@ -3,35 +3,39 @@
 ## Verified GitHub Actions Milestones
 - **Run `44678399756`** (`main` @ `f2261702b0f4dfd8a0a1bb6d4d0c20aa056cd732`): Confirmed root workflow `/.github/workflows/build-windows-installers.yml` triggers on `windows-latest`; surfaced WPF `CS0104` and NuGet advisories.
 - **Run `44679766730`** (`main` @ `21da7f890ab7dddd0452adcadf282468df6c73da`): `.NET 10` compilation PASSED, NuGet advisories RESOLVED, `17/18` xUnit tests passed; surfaced SQLite FK `ProjectGroupId` test failure.
-- **Run `44681873469`** (`main` @ `e4ab9076b67ca039279b6b71d10408fd503e1d0e`):
+- **Run `44681873469`** (`main` @ `e4ab9076b67ca039279b6b71d10408fd503e1d0e`): `.NET 10` compilation PASSED, SQLite FK PASSED, `19/20` xUnit tests passed; surfaced SQLite `DateTimeOffset` `ORDER BY` failure.
+- **Run `44684923525`** (`main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`): **FULL GREEN BUILD & INSTALLER PACKAGING**:
   - Native `.NET 10` Windows compilation: **PASSED**.
-  - SQLite foreign-key enforcement & `ProjectGroupId` regression suite: **PASSED**.
-  - Automated xUnit tests: **19/20 PASSED** (`1/1` Integration, `1/1` Agent, `17/18` Unit).
-  - Remaining failure diagnosed and repaired in source: EF Core SQLite `DateTimeOffset` `ORDER BY` `NotSupportedException` at `ServerForgeStore.cs:568` (plus `GetLocalAdminAsync` at line 30 and `GetRecentAuditLogsAsync` at line 581).
-- **Post-Run `44681873469` Persistence & Migration Hardening**:
-  - Added `UtcIso8601DateTimeOffsetConverter` (`yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'`) globally across `ServerForgeDbContext` so all `DateTimeOffset` / `DateTimeOffset?` columns sort and filter natively in SQLite across mixed UTC offsets.
-  - Added `SqliteSchemaMigrator` (versioned `__ServerForgeSchemaVersions`, online SQLite pre-upgrade `.bak` backup, atomic transaction with fail-safe rollback, v1 additive baseline compatibility, and v2 UTC timestamp backfill across all 11 tables).
-  - Added 4 comprehensive regression test suites (**24 total xUnit tests**).
+  - Automated xUnit tests: **24 / 24 PASSED**.
+  - Self-contained `win-x64` Desktop (`~62.92 MB`) & Agent (`~46.64 MB`) Inno Setup 6 installers + `SHA256SUMS.txt`: **GENERATED & UPLOADED**.
 
-## Feature & Defect Status Matrix
+## Phase 11 Enhancements Implemented (Pending Windows CI Run #5)
+- **Phase A — Automated Windows Installer Smoke Tests**:
+  - Added `/ServerForge/scripts/smoke-test-installers.ps1` (8 Desktop installer checks + 10 Agent installer/service/loopback/upgrade/uninstall checks) and `smoke-test-windows-installers` CI job in `/.github/workflows/build-windows-installers.yml`.
+  - Hardened `ServerForge-Agent.iss` (`SetupLogging=yes`, `/SERVICENAME=...` persisted for uninstall, silent-safe `SuppressibleMsgBox` when IIS is absent) and `ServerForge-Desktop.iss` (`SetupLogging=yes`).
+- **Phase B & E — Desktop First-Launch & 13-Screen WPF Audit**:
+  - Fixed fatal WPF first-launch bug (`App.xaml` `ShutdownMode="OnExplicitShutdown"` so closing `SetupWizardWindow` transitions cleanly to `MainWindow`).
+  - Added global WPF crash handlers (`DispatcherUnhandledException`, `AppDomain.UnhandledException`, `TaskScheduler.UnobservedTaskException`) with Serilog + secret redaction, close-to-tray + tray exit, `ThemeManager` dynamic Dark/Light brush switching persisted to SQLite, `SetupWizard` Confirm Password + skip-server toggle, `Ctrl+,` shortcut, and audited all 13 WPF screens (`GitHubView` Import to New App, `DeploymentsView` manual verified deploy + detail view, `LogsView` live filtering + remote Agent audit sync, `DomainsSslView`/`EnvironmentVariablesView` Agent sync + delete, `DatabasesView` port auto-switching).
+  - Added `DesktopStartupAndViewModelTests` (`3` new automated ViewModel/SQLite/DPAPI/13-screen tests).
+- **Phase C — Live Desktop-to-Agent HTTPS/mTLS Integration Tests**:
+  - Extracted `AgentHostFactory` from `ServerForge.Agent/Program.cs`.
+  - Fixed Windows Schannel ephemeral private key persistence in `AgentIdentityStore` and `DesktopIdentityService` (`PersistKeySet | Exportable` PFX reload) and set `ClientCertificateOption.Manual` in `AgentTransportService`.
+  - Added `DesktopToAgentMtlsIntegrationTests` (`5` live Kestrel loopback HTTPS/mTLS tests covering pairing, replay rejection, thumbprint pinning rejection, rogue/anonymous rejection, Agent & Desktop restarts, connection recovery, cert rotation, and multi-server management).
+- **Phase D & F — Reproducible Disposable E2E Sample App & Production Protection**:
+  - Added `/ServerForge/samples/disposable-test-app/` (`.NET 10` app with `/`, `/health` supporting `SIMULATE_UNHEALTHY=true` rollback testing, `/data` persistent marker, GitHub Actions artifact workflow, and 20-step E2E runbook) + `/ServerForge/scripts/verify-e2e-deployment.ps1`.
 
-| Area | Status (Source Code) | Verification Status |
+## 8-Stage Independent Verification Status (Never Collapsed Into One Percentage)
+
+| Stage | Status | Evidence |
 |---|---|---|
-| **Problem A — Root GitHub Actions CI** | Repaired | **VERIFIED** (Runs `44678399756`, `44679766730`, `44681873469`) |
-| **Problem B — Script Failure Validation** | Repaired | **VERIFIED** (CI reliably fails on compile or test errors) |
-| **WPF `CS0104` Ambiguity & WinForms Isolation** | Repaired | **VERIFIED** (Runs `44679766730` & `44681873469`) |
-| **NuGet Advisories (`SQLitePCLRaw`, `Pkcs`)** | Patched in CPM | **VERIFIED** (Runs `44679766730` & `44681873469`) |
-| **SQLite FK Enforcement & `ProjectGroupId` Policy** | Repaired & Hardened | **VERIFIED** (Run `44681873469`) |
-| **SQLite `DateTimeOffset` `ORDER BY` & Deterministic Pagination** | Repaired (`UtcIso8601DateTimeOffsetConverter`) | **PENDING WINDOWS CI** |
-| **Safe Versioned SQLite Schema Migrations & Pre-Upgrade Backup** | Implemented (`SqliteSchemaMigrator`) | **PENDING WINDOWS CI** |
-| **Problem C — Artifact Provenance & Validation** | Repaired | **UNIT PASSED (Run `44681873469`); LIVE E2E PENDING** |
-| **Problem D — Agent Application & Project API** | Implemented | **COMPILED (Run `44681873469`); LIVE E2E PENDING** |
-| **Problem E — Pairing Persistence & Cert Rotation** | Repaired | **AGENT/DPAPI PASSED (Run `44681873469`); LIVE E2E PENDING** |
-| **Problem F — Native WPF 13-Screen UI** | Implemented | **COMPILED (Run `44681873469`); LIVE E2E PENDING** |
-| **Problem G — Durability & Rollback** | Repaired | **PENDING WINDOWS CI (timestamp ordering fixed) + LIVE E2E** |
-| **Problem H — Installer Reliability (`ISCC.exe`)** | Repaired (`out`->`var`, `sc.exe` quotes) | **PENDING WINDOWS CI + LIVE E2E** |
+| 1. Source implementation completed | **COMPLETED** | All 11 `.NET 10` projects, 13 WPF screens, Inno scripts, smoke tests, mTLS tests, and disposable sample app implemented. |
+| 2. Windows CI compilation verified | **VERIFIED (Run `44684923525`); RE-VERIFY PENDING RUN #5** | Run #4 compiled cleanly; Phase 11 source changes await CI Run #5. |
+| 3. Installer packaging verified | **VERIFIED (Run `44684923525`); RE-VERIFY PENDING RUN #5** | Desktop (`~62.92 MB`) + Agent (`~46.64 MB`) + `SHA256SUMS.txt` produced in Run #4; updated `.iss` files await CI Run #5. |
+| 4. Installer execution verified (install/service/upgrade/uninstall) | **PENDING CI RUN #5** | Automated `smoke-test-windows-installers` job added to CI workflow. |
+| 5. Native desktop interactive GUI verified (Windows 11) | **NOT VERIFIED** | Requires manual interactive Windows 11 checklist (`INSTALLATION.md` §5); CI does NOT test WPF GUI rendering. |
+| 6. Agent mTLS & IIS integration verified | **PARTIAL — mTLS PENDING CI RUN #5; LIVE IIS BLOCKED** | Live loopback Kestrel mTLS tests run in CI Run #5; live IIS site/AppPool provisioning requires Windows Server VM. |
+| 7. Autonomous GitHub deployment verified | **BLOCKED (Requires Disposable Windows Server VM)** | Unit provenance checks passed in Run #4; live push-to-IIS deployment requires disposable VM runbook. |
+| 8. Rollback verified | **PARTIAL — UNIT PASSED (Run `44684923525`); LIVE VM BLOCKED** | `DeploymentOrchestrator` auto-rollback unit tests passed; live VM rollback with `SIMULATE_UNHEALTHY=true` requires disposable VM. |
 
 ## Current Project Verdict
-
-**INCOMPLETE — PENDING WINDOWS CI FULL TEST PASS (24/24), INSTALLER PACKAGING, AND LIVE WINDOWS SERVER E2E VERIFICATION.**
-Push the repaired files to `https://github.com/Zohaib-Jadoon/SERVER-FORGE` to execute Windows CI Run #4 (compile, run all 24 xUnit tests, publish `win-x64` self-contained Desktop & Agent binaries, and build `ServerForge-Desktop-Setup.exe`, `ServerForge-Agent-Setup.exe`, and `SHA256SUMS.txt`), then perform independent live Windows Server E2E verification.
+**BUILD & INSTALLER PACKAGING VERIFIED (RUN #4); PHASE 11 RUNTIME HARDENING, LIVE mTLS TESTS & INSTALLER SMOKE TESTS PENDING WINDOWS CI RUN #5; INTERACTIVE WINDOWS 11 GUI & LIVE WINDOWS SERVER IIS E2E NOT YET VERIFIED.**

@@ -19,8 +19,11 @@
             <Border Grid.Column="0" Style="{StaticResource CardContainerStyle}">
                 <StackPanel>
                     <DockPanel Margin="0,0,0,10">
-                        <TextBlock Text="Accessible GitHub Repositories" FontSize="15" FontWeight="SemiBold" DockPanel.Dock="Left" />
-                        <Button Content="Inspect Commits" Command="{Binding LoadSelectedRepoCommitsCommand}" DockPanel.Dock="Right" Padding="10,5" />
+                        <TextBlock Text="Accessible GitHub Repositories" FontSize="15" FontWeight="SemiBold" DockPanel.Dock="Left" VerticalAlignment="Center" />
+                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                            <Button Content="Inspect Commits" Command="{Binding LoadSelectedRepoCommitsCommand}" Margin="0,0,8,0" Padding="10,5" />
+                            <Button Content="Import to New App" Command="{Binding ImportSelectedRepositoryCommand}" Style="{StaticResource PrimaryButtonStyle}" Padding="10,5" />
+                        </StackPanel>
                     </DockPanel>
                     <DataGrid ItemsSource="{Binding Repositories}" SelectedItem="{Binding SelectedRepository, Mode=TwoWay}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="260">
                         <DataGrid.Columns>

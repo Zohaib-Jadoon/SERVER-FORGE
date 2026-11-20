@@ -3,17 +3,44 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <StackPanel>
         <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
-            <DockPanel>
-                <StackPanel DockPanel.Dock="Left">
-                    <TextBlock Text="12-State Deployment Lifecycle &amp; Safe Rollback" FontSize="15" FontWeight="SemiBold" />
-                    <TextBlock Text="Application rollback restores previous healthy binaries/services without automatically reverting database schemas." FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,4,0,0" />
-                </StackPanel>
-                <Button Content="Rollback Selected Application" Command="{Binding RollbackSelectedApplicationCommand}" DockPanel.Dock="Right" Padding="14,8" />
-            </DockPanel>
+            <StackPanel>
+                <DockPanel Margin="0,0,0,12">
+                    <StackPanel DockPanel.Dock="Left">
+                        <TextBlock Text="12-State Deployment Lifecycle &amp; Safe Rollback" FontSize="15" FontWeight="SemiBold" />
+                        <TextBlock Text="Start a verified-artifact deployment or restore the last healthy release without automatically reverting database schemas." FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,4,0,0" />
+                    </StackPanel>
+                    <Button Content="Rollback Selected Application" Command="{Binding RollbackSelectedApplicationCommand}" DockPanel.Dock="Right" Padding="14,8" />
+                </DockPanel>
+
+                <UniformGrid Columns="4" Margin="0,0,0,10">
+                    <StackPanel Margin="0,0,8,0">
+                        <TextBlock Text="40-Char Commit SHA" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding DeployCommitSha, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="4,0,4,0">
+                        <TextBlock Text="Branch" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding DeployBranch, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="4,0,4,0">
+                        <TextBlock Text="Verified Artifact Path / URL" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding DeployArtifactPath, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="8,0,0,0">
+                        <TextBlock Text="Expected SHA-256 Digest" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding DeployArtifactSha256, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                </UniformGrid>
+
+                <DockPanel>
+                    <TextBlock Text="{Binding SelectedApplication.Name, StringFormat='Target App: {0}', FallbackValue='Select an application on the Applications page'}"
+                               VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" DockPanel.Dock="Left" />
+                    <Button Content="Start Verified Deployment" Command="{Binding TriggerSelectedApplicationDeploymentCommand}" DockPanel.Dock="Right" Style="{StaticResource PrimaryButtonStyle}" />
+                </DockPanel>
+            </StackPanel>
         </Border>
 
-        <Border Style="{StaticResource CardContainerStyle}">
-            <DataGrid ItemsSource="{Binding Deployments}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="320">
+        <Border Style="{StaticResource CardContainerStyle}" Margin="0,0,0,18">
+            <DataGrid ItemsSource="{Binding Deployments}" SelectedItem="{Binding SelectedDeployment, Mode=TwoWay}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="260">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110" />
                     <DataGridTextColumn Header="Commit SHA" Binding="{Binding CommitSha}" Width="140" />
@@ -23,6 +50,16 @@
                     <DataGridTextColumn Header="Error / Rollback Note" Binding="{Binding ErrorSummary}" Width="*" />
                 </DataGrid.Columns>
             </DataGrid>
+        </Border>
+
+        <Border Style="{StaticResource CardContainerStyle}">
+            <StackPanel>
+                <TextBlock Text="Selected Deployment Details" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6" />
+                <TextBlock Text="{Binding SelectedDeployment.ReleaseDirectory, StringFormat='Release Directory: {0}', FallbackValue='Select a deployment row above to inspect release path and status details.'}"
+                           FontFamily="Consolas" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding SelectedDeployment.ErrorSummary, StringFormat='Status / Error Detail: {0}', FallbackValue=''}"
+                           FontSize="12" Foreground="{DynamicResource WarningBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+            </StackPanel>
         </Border>
     </StackPanel>
 </UserControl>

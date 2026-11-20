@@ -8,7 +8,7 @@ public interface ISecretProtector
 {
     string Protect(string plaintext, string purposeContext);
     string Unprotect(string protectedBase64, string purposeContext);
-    string RedactSecrets(string input, IEnumerable<string> knownSecrets);
+    string RedactSecrets(string input, IEnumerable<string>? knownSecrets = null);
 }
 
 public interface IPathBoundaryGuard

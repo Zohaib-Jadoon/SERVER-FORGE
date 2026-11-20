@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using ServerForge.Security.Certificates;
@@ -6,6 +7,7 @@ namespace ServerForge.Agent.Configuration;
 
 public sealed class AgentOptions
 {
+    public string ServiceName { get; set; } = "ServerForgeAgent";
     public string BindAddress { get; set; } = "127.0.0.1";
     public int Port { get; set; } = 9443;
     public string DataRoot { get; set; } = @"C:\ProgramData\ServerForge\Agent";
@@ -44,16 +46,21 @@ public sealed class AgentIdentityStore
 
     public X509Certificate2 LoadOrCreateServerCertificate()
     {
-        if (File.Exists(_certPfxPath))
-            return X509CertificateLoader.LoadPkcs12FromFile(_certPfxPath, password: null);
+        const X509KeyStorageFlags storageFlags =
+            X509KeyStorageFlags.PersistKeySet |
+            X509KeyStorageFlags.Exportable;
 
-        var cert = MutualTlsCertificateManager.CreateSelfSignedIdentityCertificate(
+        if (File.Exists(_certPfxPath))
+            return X509CertificateLoader.LoadPkcs12FromFile(_certPfxPath, password: null, storageFlags);
+
+        using var ephemeralCert = MutualTlsCertificateManager.CreateSelfSignedIdentityCertificate(
             commonName: Environment.MachineName,
             isServerCertificate: true,
-            subjectAlternativeDnsNames: [Environment.MachineName, "localhost"]);
+            subjectAlternativeDnsNames: [Environment.MachineName, "localhost"],
+            subjectAlternativeIps: [IPAddress.Loopback, IPAddress.IPv6Loopback]);
 
-        File.WriteAllBytes(_certPfxPath, cert.Export(X509ContentType.Pfx));
-        return cert;
+        File.WriteAllBytes(_certPfxPath, ephemeralCert.Export(X509ContentType.Pfx));
+        return X509CertificateLoader.LoadPkcs12FromFile(_certPfxPath, password: null, storageFlags);
     }
 
     public void CompletePairing(string desktopInstanceId, string desktopCertThumbprint)

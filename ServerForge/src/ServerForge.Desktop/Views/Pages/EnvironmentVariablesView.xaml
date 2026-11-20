@@ -33,14 +33,20 @@
         </Border>
 
         <Border Style="{StaticResource CardContainerStyle}">
-            <DataGrid ItemsSource="{Binding EnvironmentVariables}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="220">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="Tier" Binding="{Binding Tier}" Width="110" />
-                    <DataGridTextColumn Header="Key" Binding="{Binding Key}" Width="2*" />
-                    <DataGridTextColumn Header="Secret (DPAPI)" Binding="{Binding IsSecret}" Width="110" />
-                    <DataGridTextColumn Header="Updated (UTC)" Binding="{Binding UpdatedAtUtc}" Width="*" />
-                </DataGrid.Columns>
-            </DataGrid>
+            <StackPanel>
+                <DockPanel Margin="0,0,0,10">
+                    <TextBlock Text="Saved Environment Variables" FontSize="15" FontWeight="SemiBold" DockPanel.Dock="Left" VerticalAlignment="Center" />
+                    <Button Content="Delete Selected Variable" Command="{Binding DeleteSelectedEnvVarCommand}" DockPanel.Dock="Right" Padding="10,5" />
+                </DockPanel>
+                <DataGrid ItemsSource="{Binding EnvironmentVariables}" SelectedItem="{Binding SelectedEnvVar, Mode=TwoWay}" AutoGenerateColumns="False" IsReadOnly="True" MinHeight="220">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Tier" Binding="{Binding Tier}" Width="110" />
+                        <DataGridTextColumn Header="Key" Binding="{Binding Key}" Width="2*" />
+                        <DataGridTextColumn Header="Secret (DPAPI)" Binding="{Binding IsSecret}" Width="110" />
+                        <DataGridTextColumn Header="Updated (UTC)" Binding="{Binding UpdatedAtUtc}" Width="*" />
+                    </DataGrid.Columns>
+                </DataGrid>
+            </StackPanel>
         </Border>
     </StackPanel>
 </UserControl>

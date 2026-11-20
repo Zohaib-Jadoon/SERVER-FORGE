@@ -99,3 +99,41 @@ jobs:
             ServerForge/artifacts/installers/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
+
+  smoke-test-windows-installers:
+    name: Windows x64 Installer Smoke Tests (Desktop + Agent Service)
+    needs: build-test-package-windows
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Built Windows Installers
+        uses: actions/download-artifact@v4
+        with:
+          name: serverforge-windows-x64-installers
+          path: ServerForge/artifacts/installers
+
+      - name: Run Automated Desktop & Agent Installer Smoke Tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./ServerForge/scripts/smoke-test-installers.ps1 `
+            -InstallerDir 'ServerForge/artifacts/installers' `
+            -LogOutputDir 'ServerForge/artifacts/smoke-logs'
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "smoke-test-installers.ps1 failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload Installer Smoke Test Diagnostic Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverforge-windows-installer-smoke-logs
+          path: ServerForge/artifacts/smoke-logs/**/*
+          if-no-files-found: warn
+          retention-days: 14
+

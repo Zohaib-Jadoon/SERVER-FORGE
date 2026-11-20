@@ -36,6 +36,7 @@ CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
 AllowNoIcons=yes
+SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -64,7 +65,8 @@ begin
   Result := True;
   if not IsWin64 then
   begin
-    MsgBox('ServerForge Desktop requires 64-bit Windows 10 (2004+) or Windows 11.', mbCriticalError, MB_OK);
+    Log('Aborting ServerForge Desktop install: 64-bit Windows is required.');
+    SuppressibleMsgBox('ServerForge Desktop requires 64-bit Windows 10 (2004+) or Windows 11.', mbCriticalError, MB_OK, IDOK);
     Result := False;
   end;
 end;

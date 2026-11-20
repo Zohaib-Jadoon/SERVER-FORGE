@@ -56,15 +56,18 @@ public sealed partial class DpapiSecretProtector : ISecretProtector
         }
     }
 
-    public string RedactSecrets(string input, IEnumerable<string> knownSecrets)
+    public string RedactSecrets(string input, IEnumerable<string>? knownSecrets = null)
     {
         if (string.IsNullOrEmpty(input))
             return input;
 
         var sanitized = input;
-        foreach (var secret in knownSecrets.Where(s => !string.IsNullOrEmpty(s) && s.Length >= 4))
+        if (knownSecrets is not null)
         {
-            sanitized = sanitized.Replace(secret, "[REDACTED]", StringComparison.Ordinal);
+            foreach (var secret in knownSecrets.Where(s => !string.IsNullOrEmpty(s) && s.Length >= 4))
+            {
+                sanitized = sanitized.Replace(secret, "[REDACTED]", StringComparison.Ordinal);
+            }
         }
 
         // Redact GitHub PATs, bearer tokens, and SQL/PG password fields defensively

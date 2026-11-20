@@ -1,0 +1,47 @@
+name: Build & Publish ServerForge Disposable Sample Artifact
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-artifact:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout sample repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish Self-Contained Windows x64 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish ServerForge.SampleApp.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -o ./publish-out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package Release ZIP & Compute SHA-256 Digest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -Path ./publish-out/* -DestinationPath ./app-release.zip -Force
+          $hash = (Get-FileHash -Path ./app-release.zip -Algorithm SHA256).Hash
+          "$hash  app-release.zip" | Set-Content -Path ./app-release.zip.sha256 -Encoding ASCII
+          Write-Host "Artifact SHA-256: $hash"
+
+      - name: Upload Verified Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverforge-sample-app-win-x64
+          path: |
+            ./app-release.zip
+            ./app-release.zip.sha256
+          retention-days: 14

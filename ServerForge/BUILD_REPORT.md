@@ -1,59 +1,47 @@
 # ServerForge Build Report
 
-## Latest Verified Windows CI Run (Run #3 — Prior to This Fix Pass)
+## Latest Verified Windows CI Run (Run #4 — `44684923525`)
 - **Repository**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE`
-- **GitHub Actions Run**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE/actions/runs/44681873469`
-- **Branch / Commit**: `main` @ `e4ab9076b67ca039279b6b71d10408fd503e1d0e`
+- **GitHub Actions Run**: `https://github.com/Zohaib-Jadoon/SERVER-FORGE/actions/runs/44684923525`
+- **Branch / Commit**: `main` @ `31da1d6f862cf6ee6d5064135bcfe9da6a59ae2c`
 - **Workflow Trigger**: **SUCCEEDED** (`/.github/workflows/build-windows-installers.yml` on `windows-latest`)
-- **Verified Outcomes from Run `44681873469`**:
-  - Native `.NET 10` Windows solution compilation (`ServerForge.sln`): **PASSED** (WPF `CS0104` fixed; WinForms `NotifyIcon` preserved).
-  - NuGet security advisories (`SQLitePCLRaw.lib.e_sqlite3`, `System.Security.Cryptography.Pkcs`): **RESOLVED** (no longer reported).
-  - Previous SQLite foreign-key failure (`ProjectGroupId`): **FIXED** (`SqliteStore_EnforcesProjectGroupForeignKeys_AndRejectsInvalidDefaultGuids` and `ApplicationConfigValidator_RejectsEmptyProjectGroupId` PASSED).
-  - Automated xUnit test results: **19/20 PASSED** (`1/1` Integration, `1/1` Agent, `17/18` Unit).
-  - Single failure: `SqliteStore_PersistsPairedServer_RecoversInterruptedDeploys_AndRemovesManagementOnly` failed at `ServerForgeStore.cs:568` with `System.NotSupportedException: SQLite does not support expressions of type 'DateTimeOffset' in ORDER BY clauses.`
-  - Inno Setup compilation & Windows installers (`ServerForge-Desktop-Setup.exe`, `ServerForge-Agent-Setup.exe`, `SHA256SUMS.txt`): **NOT REACHED** because `build-windows.ps1` halted on the failed unit test.
+- **Verified Outcomes from Run `44684923525`**:
+  - Native `.NET 10` Windows solution compilation (`ServerForge.sln`): **PASSED**
+  - NuGet vulnerability audit: **PASSED** (zero reported advisories)
+  - Automated xUnit test suite: **24 / 24 PASSED**
+  - Self-contained `win-x64` Desktop & Agent publishing: **PASSED**
+  - Inno Setup 6 installer packaging: **PASSED**
+    - `ServerForge-Desktop-Setup.exe`: **GENERATED** (`~62.92 MB`, unsigned)
+    - `ServerForge-Agent-Setup.exe`: **GENERATED** (`~46.64 MB`, unsigned)
+    - `SHA256SUMS.txt`: **GENERATED**
+  - GitHub Actions artifact upload (`serverforge-windows-x64-installers`): **PASSED**
 
-## Fixes Applied After Run `44681873469`
-1. **SQLite-Native Canonical UTC ISO-8601 `DateTimeOffset` Strategy (`UtcIso8601DateTimeOffsetConverter.cs`, `ServerForgeDbContext.cs`)**:
-   - Registered `UtcIso8601DateTimeOffsetConverter` (`ValueConverter<DateTimeOffset, string>`) via `ConfigureConventions` for all `DateTimeOffset` and `DateTimeOffset?` properties across all 11 entities.
-   - Persists every timestamp normalized to UTC in fixed-width `yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'` format (`TEXT`), enabling EF Core 10 to translate `ORDER BY`, `WHERE`, range scans, and `LIMIT`/`OFFSET` directly in SQLite without client-side table loads and with exact chronological ordering across arbitrary source UTC offsets.
-2. **Audited & Repaired All 3 Vulnerable Timestamp Queries (`ServerForgeStore.cs`)**:
-   - `GetLocalAdminAsync`: `.OrderBy(a => a.CreatedAtUtc).ThenBy(a => a.Id).FirstOrDefaultAsync(ct)`
-   - `GetDeploymentHistoryAsync`: `.AsNoTracking().OrderByDescending(d => d.QueuedAtUtc).ThenByDescending(d => d.Id)` + offset/limit pagination overload `(Guid? applicationId, int skip, int take, CancellationToken ct)` with `CancellationToken` propagation and argument guards.
-   - `GetRecentAuditLogsAsync`: `.AsNoTracking().OrderByDescending(a => a.TimestampUtc).ThenByDescending(a => a.Id)` + offset/limit pagination overload `(int skip, int take, CancellationToken ct)`.
-3. **Versioned Safe SQLite Schema Migrator (`SqliteSchemaMigrator.cs`, `ServerForgeDbContext.InitializeSqliteAsync`)**:
-   - Replaces raw `EnsureCreatedAsync` with versioned migrations tracked in `__ServerForgeSchemaVersions` (currently `v2`).
-   - Fresh installs run `EnsureCreatedAsync` cleanly and stamp `v1` + `v2`.
-   - Existing databases requiring upgrades are backed up first via `SqliteConnection.BackupDatabase` (`<dbDir>/backups/<dbName>.pre-v2.<stamp>.bak`, `Pooling=False` to avoid Windows file locks), upgraded atomically inside a SQLite transaction (`v1` additive baseline table/index compatibility + `v2` in-place canonical UTC ISO-8601 timestamp backfill across all 11 tables), and rolled back safely (`SqliteMigrationException` with `BackupFilePath`) on any failure without ever deleting existing databases.
-4. **Expanded xUnit Regression Suite (`ServerForgeUnitTests.cs`)**:
-   - Added 4 comprehensive test suites covering empty/single/multiple deployment history, mixed UTC offsets, same-timestamp deterministic tie-breaking, pagination limits, cancellation tokens, audit log ordering, local admin retrieval, SQLite reopen persistence, fresh install + legacy schema upgrade with backup verification, and fail-safe rollback on corrupt legacy timestamps (**24 total xUnit tests**: 22 Unit, 1 Agent, 1 Integration).
+## Phase 11 Changes Added After Run `44684923525` (Awaiting CI Run #5)
+1. **Desktop First-Launch & 13-Screen Runtime Hardening**:
+   - Fixed fatal WPF first-launch `ShutdownMode="OnMainWindowClose"` bug -> `ShutdownMode="OnExplicitShutdown"` with close-to-tray + explicit tray exit.
+   - Added global WPF crash handlers (`DispatcherUnhandledException`, `AppDomain.UnhandledException`, `TaskScheduler.UnobservedTaskException`) with Serilog logging & secret redaction (`ISecretProtector.RedactSecrets` optional `knownSecrets`).
+   - Added `ThemeManager` dynamic Dark/Light brush switching persisted to SQLite `LocalAdminProfile.DarkThemeEnabled`.
+   - Hardened `SetupWizardWindow` / `SetupWizardViewModel` (Confirm Password validation, `AddServerNow` skip toggle, `ServerDisplayName`, step-aware action label, `try/catch`).
+   - Audited & repaired all 13 WPF screens (`MainWindow` `Ctrl+,` shortcut, `GitHubView` Import to New App, `DeploymentsView` manual verified deploy + details pane, `LogsView` live `FilteredAuditLogs` + remote Agent audit sync, `DomainsSslView`/`EnvironmentVariablesView` Agent sync + delete, `DatabasesView` auto-port switching).
+2. **Windows Schannel mTLS Persistence & Live Kestrel Testability**:
+   - Extracted `AgentHostFactory` from `ServerForge.Agent/Program.cs` with configurable `AgentOptions.ServiceName`.
+   - Fixed Windows Schannel ephemeral private key persistence in `AgentIdentityStore` and `DesktopIdentityService` (`PersistKeySet | Exportable` PFX reload) and set `ClientCertificateOption.Manual` in `AgentTransportService`.
+   - Added 5 live Kestrel loopback HTTPS/mTLS integration tests + 3 Desktop startup/ViewModel tests (**32 total xUnit tests**).
+3. **Automated Windows Installer Smoke Tests & Release Quality**:
+   - Hardened `ServerForge-Agent.iss` (`SetupLogging=yes`, `/SERVICENAME=...` persisted to `{app}\service-name.txt` for uninstall, silent-safe `SuppressibleMsgBox` when IIS is absent) and `ServerForge-Desktop.iss` (`SetupLogging=yes`).
+   - Added `/ServerForge/scripts/smoke-test-installers.ps1` (8 Desktop + 10 Agent checks) and added `smoke-test-windows-installers` CI job in `/.github/workflows/build-windows-installers.yml`.
+   - Added disposable E2E sample app (`/ServerForge/samples/disposable-test-app/`) and `/ServerForge/scripts/verify-e2e-deployment.ps1`.
 
-## Current Build & Packaging Status
-- **Google AI Studio Container**: Linux x64 (`gVisor`), no `.NET 10` Windows Desktop SDK, no `ISCC.exe`, no `.git` clone / GitHub push credentials.
+## Signing & Environment Transparency
+- **Installers are UNSIGNED**: No Authenticode code-signing certificate is configured in CI; Windows SmartScreen warnings are expected until verified via `SHA256SUMS.txt` or signed by the operator.
+- **Google AI Studio Container**: Linux x64 (`gVisor`) without `.NET 10` Windows SDK, `ISCC.exe`, or GitHub push credentials. All Phase 11 `.NET` compilation, `32/32` xUnit execution, and installer smoke tests must execute on GitHub Actions `windows-latest` (Run #5).
 
-| Target | Status | Evidence / Reason |
-|---|---|---|
-| Root GitHub Actions CI Trigger | **VERIFIED** | Confirmed on runs `44678399756`, `44679766730`, and `44681873469`. |
-| `ServerForge.sln` compilation (`dotnet build`) | **VERIFIED (Run `44681873469`); RE-VERIFY PENDING CI** | Prior run compiled cleanly; post-fix changes await push to `Zohaib-Jadoon/SERVER-FORGE`. |
-| NuGet Vulnerability Audit | **VERIFIED (Run `44681873469`)** | Zero reported advisories for `SQLitePCLRaw.lib.e_sqlite3` or `System.Security.Cryptography.Pkcs`. |
-| Full xUnit Test Suite (24 tests) | **PENDING WINDOWS CI** | 19/20 passed in run `44681873469`; `DateTimeOffset` `ORDER BY` fixed + 4 new regression tests added. |
-| `ServerForge-Desktop-Setup.exe` & `SHA256SUMS.txt` | **PENDING WINDOWS CI** | Will publish (`win-x64` self-contained) and compile via `ISCC.exe` on `windows-latest` once all 24 tests pass. |
-| `ServerForge-Agent-Setup.exe` & `SHA256SUMS.txt` | **PENDING WINDOWS CI** | Will publish (`win-x64` self-contained) and compile via `ISCC.exe` on `windows-latest` once all 24 tests pass. |
-| Read-Only Source Explorer Companion (`tsc --noEmit` + `vite build`) | **VERIFIED** | Inspects source archive only; does NOT verify C#/.NET compilation or Windows installers. |
-
-## Next Steps to Trigger Windows CI (Run #4)
+## Next Steps to Trigger Windows CI Run #5
 ```powershell
-git checkout -b fix/sqlite-datetimeoffset-and-migrations
+git checkout -b feat/phase11-runtime-verification
 # Extract updated archive into repository root, preserving /.github/workflows/build-windows-installers.yml
 git status
-git add ServerForge/src/ServerForge.Infrastructure/Persistence/UtcIso8601DateTimeOffsetConverter.cs `
-        ServerForge/src/ServerForge.Infrastructure/Persistence/SqliteSchemaMigrator.cs `
-        ServerForge/src/ServerForge.Infrastructure/Persistence/ServerForgeDbContext.cs `
-        ServerForge/src/ServerForge.Infrastructure/Persistence/ServerForgeStore.cs `
-        ServerForge/tests/ServerForge.UnitTests/ServerForgeUnitTests.cs `
-        ServerForge/BUILD_REPORT.md ServerForge/TEST_REPORT.md `
-        ServerForge/DEVELOPMENT_STATUS.md ServerForge/PRODUCTION_READINESS_REPORT.md `
-        ServerForge/MEMORY.md
-git commit -m "Fix SQLite DateTimeOffset ORDER BY translation and add versioned SQLite schema migrator with pre-upgrade backup"
-git push -u origin fix/sqlite-datetimeoffset-and-migrations
+git add .github/workflows/build-windows-installers.yml ServerForge/
+git commit -m "Phase 11: Desktop/mTLS runtime hardening, live Kestrel mTLS tests, automated installer smoke tests, and disposable E2E sample"
+git push -u origin feat/phase11-runtime-verification
 ```

@@ -24,4 +24,10 @@ public partial class SetupWizardWindow : Window
         if (sender is System.Windows.Controls.PasswordBox pb)
             _viewModel.AdminPassword = pb.Password;
     }
+
+    private void OnConfirmPasswordChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.PasswordBox pb)
+            _viewModel.AdminPasswordConfirm = pb.Password;
+    }
 }

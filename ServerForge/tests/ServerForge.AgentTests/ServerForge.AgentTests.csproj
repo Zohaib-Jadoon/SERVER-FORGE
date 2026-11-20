@@ -1,13 +1,25 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Moq" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <ProjectReference Include="..\..\src\ServerForge.Agent\ServerForge.Agent.csproj" />
+    <ProjectReference Include="..\..\src\ServerForge.Desktop\ServerForge.Desktop.csproj" />
+    <ProjectReference Include="..\..\src\ServerForge.Contracts\ServerForge.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\ServerForge.Core\ServerForge.Core.csproj" />
+    <ProjectReference Include="..\..\src\ServerForge.Infrastructure\ServerForge.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\ServerForge.Security\ServerForge.Security.csproj" />
   </ItemGroup>
 </Project>

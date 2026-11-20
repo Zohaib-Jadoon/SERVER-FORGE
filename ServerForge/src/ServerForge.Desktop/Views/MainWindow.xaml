@@ -21,6 +21,7 @@
         <KeyBinding Key="M" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Monitoring" />
         <KeyBinding Key="L" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Logs" />
         <KeyBinding Key="B" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Backups" />
+        <KeyBinding Key="OemComma" Modifiers="Ctrl" Command="{Binding NavigateToCommand}" CommandParameter="Settings" />
         <KeyBinding Key="T" Modifiers="Ctrl" Command="{Binding ToggleThemeCommand}" />
     </Window.InputBindings>
 

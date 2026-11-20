@@ -12,7 +12,7 @@ namespace ServerForge.Desktop.ViewModels;
 
 /// <summary>
 /// 10-step First-Launch Setup Wizard ViewModel that persists local admin, DPAPI GitHub PAT,
-/// and paired Windows Server certificate identities directly to local SQLite (Problem E).
+/// and paired Windows Server certificate identities directly to local SQLite.
 /// </summary>
 public sealed partial class SetupWizardViewModel : ObservableObject
 {
@@ -42,6 +42,7 @@ public sealed partial class SetupWizardViewModel : ObservableObject
     [ObservableProperty] private string _adminDisplayName = Environment.UserName;
     [ObservableProperty] private string _adminUsername = Environment.UserName;
     [ObservableProperty] private string _adminPassword = string.Empty;
+    [ObservableProperty] private string _adminPasswordConfirm = string.Empty;
 
     [ObservableProperty] private bool _dpapiVerified;
 
@@ -74,11 +75,18 @@ public sealed partial class SetupWizardViewModel : ObservableObject
         _ => "ServerForge Setup"
     };
 
-    partial void OnCurrentStepChanged(int value) => OnPropertyChanged(nameof(StepTitle));
+    public string PrimaryActionLabel => CurrentStep == 10 ? "Finish & Open Dashboard" : "Continue";
+
+    partial void OnCurrentStepChanged(int value)
+    {
+        OnPropertyChanged(nameof(StepTitle));
+        OnPropertyChanged(nameof(PrimaryActionLabel));
+    }
 
     [RelayCommand]
     private void PreviousStep()
     {
+        StatusBanner = string.Empty;
         if (CurrentStep > 1)
             CurrentStep--;
     }
@@ -90,15 +98,17 @@ public sealed partial class SetupWizardViewModel : ObservableObject
 
         if (CurrentStep == 2)
         {
-            if (string.IsNullOrWhiteSpace(AdminUsername) || AdminPassword.Length < 8)
+            if (!ValidateAdminCredentials(out var error))
             {
-                StatusBanner = "Enter a local username and a password of at least 8 characters.";
+                StatusBanner = error;
                 return;
             }
         }
         else if (CurrentStep == 3 && !DpapiVerified)
         {
             VerifyDpapiStore();
+            if (!DpapiVerified)
+                return;
         }
         else if (CurrentStep == 5 && !AddServerNow)
         {
@@ -113,6 +123,36 @@ public sealed partial class SetupWizardViewModel : ObservableObject
 
         if (CurrentStep < 10)
             CurrentStep++;
+    }
+
+    public bool ValidateAdminCredentials(out string errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(AdminDisplayName))
+        {
+            errorMessage = "Enter a local administrator display name.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(AdminUsername) || AdminUsername.Trim().Length < 2)
+        {
+            errorMessage = "Enter a local administrator username (at least 2 characters).";
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(AdminPassword) || AdminPassword.Length < 8)
+        {
+            errorMessage = "Enter a password of at least 8 characters.";
+            return false;
+        }
+
+        if (!string.Equals(AdminPassword, AdminPasswordConfirm, StringComparison.Ordinal))
+        {
+            errorMessage = "Passwords do not match. Re-enter both password fields.";
+            return false;
+        }
+
+        errorMessage = string.Empty;
+        return true;
     }
 
     [RelayCommand]
@@ -158,6 +198,10 @@ public sealed partial class SetupWizardViewModel : ObservableObject
                 GitHubValidationSummary = $"Validation failed: {res.ErrorMessage}";
             }
         }
+        catch (Exception ex)
+        {
+            GitHubValidationSummary = $"GitHub validation error: {_secretProtector.RedactSecrets(ex.Message, [GitHubToken.Trim()])}";
+        }
         finally
         {
             IsBusy = false;
@@ -167,6 +211,14 @@ public sealed partial class SetupWizardViewModel : ObservableObject
     [RelayCommand]
     private async Task PairAgentAsync()
     {
+        if (string.IsNullOrWhiteSpace(ServerHostAddress) ||
+            string.IsNullOrWhiteSpace(AgentPairingCode) ||
+            string.IsNullOrWhiteSpace(AgentCertThumbprint))
+        {
+            PairingStatus = "Enter the server VPN/private IP, one-time pairing code, and pinned server certificate thumbprint.";
+            return;
+        }
+
         IsBusy = true;
         try
         {
@@ -186,7 +238,7 @@ public sealed partial class SetupWizardViewModel : ObservableObject
             PairedServer = new ManagedServer
             {
                 AgentId = resp.AgentId,
-                DisplayName = ServerDisplayName.Trim(),
+                DisplayName = string.IsNullOrWhiteSpace(ServerDisplayName) ? resp.Hostname : ServerDisplayName.Trim(),
                 HostAddress = ServerHostAddress.Trim(),
                 AgentPort = ServerAgentPort,
                 PinnedServerCertThumbprint = resp.AgentCertificateThumbprint,
@@ -195,17 +247,21 @@ public sealed partial class SetupWizardViewModel : ObservableObject
                 LastSeenUtc = DateTimeOffset.UtcNow
             };
 
-            // Persist immediately to local SQLite so restarts never require re-pairing (Problem E)
+            // Persist immediately to local SQLite so restarts never require re-pairing
             await _store.UpsertServerAsync(PairedServer, AdminUsername);
 
             if (!string.IsNullOrWhiteSpace(GitHubToken))
-                await _agentTransport.SyncGitHubPatAsync(PairedServer, GitHubToken.Trim(), CancellationToken.None);
+            {
+                try { await _agentTransport.SyncGitHubPatAsync(PairedServer, GitHubToken.Trim(), CancellationToken.None); }
+                catch { /* Local DPAPI vault already saved PAT; Agent sync can be retried in Settings */ }
+            }
 
-            PairingStatus = $"Mutual-TLS pairing persisted to local SQLite for {resp.Hostname} (Agent {resp.AgentId[..8]}).";
+            var shortId = resp.AgentId.Length >= 8 ? resp.AgentId[..8] : resp.AgentId;
+            PairingStatus = $"Mutual-TLS pairing persisted to local SQLite for {resp.Hostname} (Agent {shortId}).";
         }
         catch (Exception ex)
         {
-            PairingStatus = $"Connection error: {ex.Message}";
+            PairingStatus = $"Connection error: {_secretProtector.RedactSecrets(ex.Message)}";
         }
         finally
         {
@@ -248,11 +304,17 @@ public sealed partial class SetupWizardViewModel : ObservableObject
 
     private async Task CompleteSetupAsync()
     {
+        if (!ValidateAdminCredentials(out var validationError))
+        {
+            StatusBanner = validationError;
+            CurrentStep = 2;
+            return;
+        }
+
         IsBusy = true;
         try
         {
-            var (hash, salt) = LocalPasswordHasher.HashPassword(
-                string.IsNullOrWhiteSpace(AdminPassword) ? Guid.NewGuid().ToString("N") : AdminPassword);
+            var (hash, salt) = LocalPasswordHasher.HashPassword(AdminPassword);
 
             await _store.SaveLocalAdminAsync(new LocalAdminProfile
             {
@@ -265,12 +327,16 @@ public sealed partial class SetupWizardViewModel : ObservableObject
             });
 
             if (PairedServer is not null)
-                await _store.UpsertServerAsync(PairedServer, AdminUsername);
+                await _store.UpsertServerAsync(PairedServer, AdminUsername.Trim());
 
             if (!string.IsNullOrWhiteSpace(GitHubToken))
-                await _store.SaveVaultSecretAsync("github:pat", GitHubToken.Trim(), AdminUsername);
+                await _store.SaveVaultSecretAsync("github:pat", GitHubToken.Trim(), AdminUsername.Trim());
 
             WizardCompleted?.Invoke(this, true);
+        }
+        catch (Exception ex)
+        {
+            StatusBanner = $"Failed to save setup profile: {_secretProtector.RedactSecrets(ex.Message)}";
         }
         finally
         {

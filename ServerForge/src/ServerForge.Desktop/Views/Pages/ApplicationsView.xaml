@@ -7,28 +7,40 @@
                 <TextBlock Text="Register Managed Application (9 Supported Windows Runtimes)" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12" />
                 <UniformGrid Columns="3" Margin="0,0,0,10">
                     <StackPanel Margin="0,0,10,8">
+                        <TextBlock Text="Project Group" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <ComboBox ItemsSource="{Binding Projects}" SelectedItem="{Binding SelectedProject}" DisplayMemberPath="Name" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="5,0,5,8">
                         <TextBlock Text="Application Name" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
                         <TextBox Text="{Binding NewAppName, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
                     </StackPanel>
-                    <StackPanel Margin="5,0,5,8">
+                    <StackPanel Margin="10,0,0,8">
                         <TextBlock Text="Slug (lowercase-hyphen)" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
                         <TextBox Text="{Binding NewAppSlug, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
                     </StackPanel>
-                    <StackPanel Margin="10,0,0,8">
+                    <StackPanel Margin="0,0,10,8">
                         <TextBlock Text="Runtime Adapter" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
                         <ComboBox ItemsSource="{Binding AvailableRuntimes}" SelectedItem="{Binding NewAppRuntime}" Padding="8,6" />
                     </StackPanel>
-                    <StackPanel Margin="0,0,10,8">
+                    <StackPanel Margin="5,0,5,8">
                         <TextBlock Text="GitHub Repository (owner/repo)" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
                         <TextBox Text="{Binding NewAppRepo, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
                     </StackPanel>
-                    <StackPanel Margin="5,0,5,8">
+                    <StackPanel Margin="10,0,0,8">
                         <TextBlock Text="Deployment Branch" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
                         <TextBox Text="{Binding NewAppBranch, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
                     </StackPanel>
-                    <StackPanel Margin="10,0,0,8">
+                    <StackPanel Margin="0,0,10,8">
                         <TextBlock Text="Internal Loopback Port" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
                         <TextBox Text="{Binding NewAppPort, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="5,0,5,8">
+                        <TextBlock Text="Primary Domain (optional)" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding NewAppDomain, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
+                    </StackPanel>
+                    <StackPanel Margin="10,0,0,8">
+                        <TextBlock Text="Working Directory" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        <TextBox Text="{Binding NewAppWorkingDir, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" />
                     </StackPanel>
                 </UniformGrid>
                 <DockPanel>
