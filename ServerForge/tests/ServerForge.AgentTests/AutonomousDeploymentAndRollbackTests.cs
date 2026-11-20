@@ -834,4 +834,429 @@ public sealed class AutonomousDeploymentAndRollbackTests
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task AutonomousWorker_DeploysCommitDetectedBeforeArtifactReady_EvenWhenAllSubsequentBranchChecksReturnHttp304()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"sf-etag304-{Guid.NewGuid():N}");
+        var dataRoot = Path.Combine(root, "agent-data");
+        var appsRoot = Path.Combine(root, "apps");
+        var artifactsDir = Path.Combine(root, "artifacts");
+        Directory.CreateDirectory(dataRoot);
+        Directory.CreateDirectory(appsRoot);
+        Directory.CreateDirectory(artifactsDir);
+
+        await using var targetHost = new LoopbackSampleIisHost();
+        await targetHost.StartAsync();
+
+        try
+        {
+            var (v1Zip, v1Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v1.zip", "2.1.0-after-304", unhealthy: false);
+
+            var dbPath = Path.Combine(dataRoot, "agent-state.db");
+            var dbOpts = new DbContextOptionsBuilder<ServerForgeDbContext>().UseSqlite($"Data Source={dbPath}").Options;
+            await using (var initDb = new ServerForgeDbContext(dbOpts))
+                await initDb.InitializeSqliteAsync();
+
+            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => new ServerForgeDbContext(dbOpts));
+
+            var protector = new DpapiSecretProtector(DataProtectionScope.CurrentUser);
+            var store = new ServerForgeStore(factoryMock.Object, protector);
+            var agentOpts = new AgentOptions { DataRoot = dataRoot, AppsRoot = appsRoot };
+            var identityStore = new AgentIdentityStore(agentOpts);
+            identityStore.UpdateState(s => s.ProtectedGitHubPat = protector.Protect("github_pat_etag304_test", "agent:github-pat"));
+
+            var proj = await store.EnsureDefaultProjectAsync("test");
+            var app = new ManagedApplication
+            {
+                ProjectGroupId = proj.Id,
+                ServerId = Guid.NewGuid(),
+                Name = "ETag 304 Autonomous App",
+                Slug = "etag-304-app",
+                RuntimeType = ApplicationRuntimeType.AspNetCore,
+                RepositoryFullName = "owner/etag-304-app",
+                Branch = "main",
+                AutoDeployEnabled = true,
+                RepositoryExplicitlyAuthorized = true,
+                SourceMode = DeploymentSourceMode.GitHubActionsArtifact,
+                GitHubWorkflowFileName = "serverforge-deploy.yml",
+                InternalPort = targetHost.Port,
+                IisSiteName = "ServerForge_E2E_ETag304",
+                IisAppPoolName = "ServerForge_E2E_ETag304_Pool",
+                PrimaryDomain = "localhost",
+                HealthCheckPath = "/health",
+                HealthCheckTimeoutSeconds = 5,
+                AutoRollbackOnFailure = true,
+                ReleasesRootPath = Path.Combine(appsRoot, "etag-304-app"),
+                PersistentDataPath = Path.Combine(appsRoot, "etag-304-app", "data")
+            };
+            await store.UpsertApplicationAsync(app, "test");
+
+            var adapter = new AspNetCoreDeploymentAdapter(targetHost);
+            using var healthHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var orchestrator = new DeploymentOrchestrator(
+                [adapter], new PathBoundaryGuard(), protector, healthHttp, NullLogger<DeploymentOrchestrator>.Instance, store);
+
+            var headPollCount = 0;
+            var artifactPollCount = 0;
+            var ghMock = new Mock<IGitHubClient>();
+
+            // Poll 1 returns HTTP 200 with CommitV1 + ETag; ALL subsequent polls return HTTP 304 Not Modified!
+            ghMock.Setup(g => g.CheckBranchHeadConditionalAsync(It.IsAny<string>(), "owner/etag-304-app", "main", It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string _, string _, string _, string? etag, CancellationToken _) =>
+                {
+                    headPollCount++;
+                    if (headPollCount == 1)
+                        return new GitHubHeadCheckResult(true, CommitV1, "push v1 before build completes", "dev", "\"etag-v1\"", 4999);
+                    Assert.Equal("\"etag-v1\"", etag);
+                    return new GitHubHeadCheckResult(false, null, null, null, "\"etag-v1\"", 4999);
+                });
+
+            // Artifact readiness progresses across polls 1 -> 4 while branch HEAD stays HTTP 304!
+            ghMock.Setup(g => g.DownloadVerifiedWorkflowArtifactAsync(
+                    It.IsAny<string>(), "owner/etag-304-app", "main", CommitV1, "serverforge-deploy.yml", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() =>
+                {
+                    artifactPollCount++;
+                    return artifactPollCount switch
+                    {
+                        1 => new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null, "Workflow not started yet.", GitHubArtifactResolutionStatus.WorkflowNotStarted),
+                        2 => new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null, "Workflow running.", GitHubArtifactResolutionStatus.WorkflowRunning),
+                        3 => new GitHubArtifactDownloadResult(false, null, null, null, 7001, null, null, null, "Artifact upload pending.", GitHubArtifactResolutionStatus.WorkflowSucceededArtifactPending),
+                        _ => new GitHubArtifactDownloadResult(true, v1Zip, v1Sha, v1Sha, 7001, 8001, "serverforge-sample-app-win-x64", "GitHubActionsRun:7001/Artifact:8001", null, GitHubArtifactResolutionStatus.ArtifactVerified)
+                    };
+                });
+
+            var clock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+            var worker = new GitHubAutoDeployWorker(
+                store, ghMock.Object, orchestrator, protector, identityStore, Options.Create(agentOpts), NullLogger<GitHubAutoDeployWorker>.Instance, clock);
+
+            // Poll 1 (HTTP 200): Commit detected, workflow not started yet
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            var c1 = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.NotNull(c1);
+            Assert.Equal(AutonomousCandidateState.WorkflowNotStarted, c1!.State);
+            Assert.Empty(await store.GetDeploymentHistoryAsync(app.Id));
+
+            // Poll 2 (HTTP 304): Must STILL check CommitV1 -> WorkflowRunning
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            var c2 = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.Equal(AutonomousCandidateState.WorkflowRunning, c2!.State);
+
+            // Poll 3 (HTTP 304): Must STILL check CommitV1 -> WorkflowSucceededArtifactPending
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            var c3 = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.Equal(AutonomousCandidateState.WorkflowSucceededArtifactPending, c3!.State);
+            Assert.Equal(7001L, c3.WorkflowRunId);
+
+            // Poll 4 (HTTP 304): Artifact now verified -> MUST autonomously deploy CommitV1!
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            var c4 = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, c4!.State);
+            Assert.Equal(8001L, c4.ArtifactId);
+            Assert.NotNull(c4.DeploymentId);
+
+            var history = await store.GetDeploymentHistoryAsync(app.Id);
+            Assert.Single(history);
+            Assert.Equal(DeploymentState.Successful, history[0].State);
+            Assert.True(history[0].TriggeredAutomatically);
+
+            using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
+            var liveRoot = await probeHttp.GetFromJsonAsync<JsonElement>("/");
+            Assert.Equal("2.1.0-after-304", liveRoot.GetProperty("version").GetString());
+
+            // Poll 5 (HTTP 304): Already deployed -> MUST NOT call DownloadVerifiedWorkflowArtifactAsync again!
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            Assert.Equal(4, artifactPollCount);
+            Assert.Single(await store.GetDeploymentHistoryAsync(app.Id));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AutonomousWorker_PersistsPendingCandidateAcrossAgentRestart_AndResumesUnderHttp304()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"sf-restart-pending-{Guid.NewGuid():N}");
+        var dataRoot = Path.Combine(root, "agent-data");
+        var appsRoot = Path.Combine(root, "apps");
+        var artifactsDir = Path.Combine(root, "artifacts");
+        Directory.CreateDirectory(dataRoot);
+        Directory.CreateDirectory(appsRoot);
+        Directory.CreateDirectory(artifactsDir);
+
+        await using var targetHost = new LoopbackSampleIisHost();
+        await targetHost.StartAsync();
+
+        try
+        {
+            var (v1Zip, v1Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v1.zip", "2.2.0-resumed", unhealthy: false);
+
+            var dbPath = Path.Combine(dataRoot, "agent-state.db");
+            var dbOpts = new DbContextOptionsBuilder<ServerForgeDbContext>().UseSqlite($"Data Source={dbPath}").Options;
+            await using (var initDb = new ServerForgeDbContext(dbOpts))
+                await initDb.InitializeSqliteAsync();
+
+            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => new ServerForgeDbContext(dbOpts));
+
+            var protector = new DpapiSecretProtector(DataProtectionScope.CurrentUser);
+            var store = new ServerForgeStore(factoryMock.Object, protector);
+            var agentOpts = new AgentOptions { DataRoot = dataRoot, AppsRoot = appsRoot };
+            var identityStore = new AgentIdentityStore(agentOpts);
+            identityStore.UpdateState(s => s.ProtectedGitHubPat = protector.Protect("github_pat_restart_pending", "agent:github-pat"));
+
+            var proj = await store.EnsureDefaultProjectAsync("test");
+            var app = new ManagedApplication
+            {
+                ProjectGroupId = proj.Id,
+                ServerId = Guid.NewGuid(),
+                Name = "Restart Pending App",
+                Slug = "restart-pending-app",
+                RuntimeType = ApplicationRuntimeType.AspNetCore,
+                RepositoryFullName = "owner/restart-pending",
+                Branch = "main",
+                AutoDeployEnabled = true,
+                RepositoryExplicitlyAuthorized = true,
+                SourceMode = DeploymentSourceMode.GitHubActionsArtifact,
+                GitHubWorkflowFileName = "serverforge-deploy.yml",
+                InternalPort = targetHost.Port,
+                IisSiteName = "ServerForge_E2E_RestartPending",
+                IisAppPoolName = "ServerForge_E2E_RestartPending_Pool",
+                PrimaryDomain = "localhost",
+                HealthCheckPath = "/health",
+                HealthCheckTimeoutSeconds = 5,
+                AutoRollbackOnFailure = true,
+                ReleasesRootPath = Path.Combine(appsRoot, "restart-pending-app"),
+                PersistentDataPath = Path.Combine(appsRoot, "restart-pending-app", "data")
+            };
+            await store.UpsertApplicationAsync(app, "test");
+
+            var adapter = new AspNetCoreDeploymentAdapter(targetHost);
+            using var healthHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var orchestrator = new DeploymentOrchestrator(
+                [adapter], new PathBoundaryGuard(), protector, healthHttp, NullLogger<DeploymentOrchestrator>.Instance, store);
+
+            var artifactReady = false;
+            string? observedETagAfterRestart = null;
+            var ghMock = new Mock<IGitHubClient>();
+            ghMock.Setup(g => g.CheckBranchHeadConditionalAsync(It.IsAny<string>(), "owner/restart-pending", "main", It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string _, string _, string _, string? etag, CancellationToken _) =>
+                {
+                    if (!artifactReady)
+                        return new GitHubHeadCheckResult(true, CommitV1, "commit before restart", "dev", "\"etag-persist-1\"", 4900);
+                    observedETagAfterRestart = etag;
+                    return new GitHubHeadCheckResult(false, null, null, null, "\"etag-persist-1\"", 4900);
+                });
+
+            ghMock.Setup(g => g.DownloadVerifiedWorkflowArtifactAsync(
+                    It.IsAny<string>(), "owner/restart-pending", "main", CommitV1, "serverforge-deploy.yml", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => artifactReady
+                    ? new GitHubArtifactDownloadResult(true, v1Zip, v1Sha, v1Sha, 7101, 8101, "serverforge-release", "GitHubActionsRun:7101/Artifact:8101", null, GitHubArtifactResolutionStatus.ArtifactVerified)
+                    : new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null, "Build still running.", GitHubArtifactResolutionStatus.WorkflowRunning));
+
+            // Worker 1 detects CommitV1 while workflow is running, persists candidate to SQLite, then Agent restarts!
+            var workerBeforeRestart = new GitHubAutoDeployWorker(
+                store, ghMock.Object, orchestrator, protector, identityStore, Options.Create(agentOpts), NullLogger<GitHubAutoDeployWorker>.Instance);
+            await workerBeforeRestart.PollAuthorizedApplicationsAsync(CancellationToken.None);
+
+            // Simulate startup recovery on Agent restart: pending WorkflowRunning candidate MUST be preserved!
+            var recoveredCount = await store.RecoverInterruptedAutonomousCandidatesAsync();
+            Assert.Equal(0, recoveredCount);
+            var persisted = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.NotNull(persisted);
+            Assert.Equal(AutonomousCandidateState.WorkflowRunning, persisted!.State);
+            Assert.Equal("\"etag-persist-1\"", persisted.LastBranchHeadETag);
+
+            // Worker 2 boots after Agent restart with empty in-memory cache; GitHub returns HTTP 304, artifact is now ready!
+            artifactReady = true;
+            var workerAfterRestart = new GitHubAutoDeployWorker(
+                store, ghMock.Object, orchestrator, protector, identityStore, Options.Create(agentOpts), NullLogger<GitHubAutoDeployWorker>.Instance);
+            await workerAfterRestart.PollAuthorizedApplicationsAsync(CancellationToken.None);
+
+            Assert.Equal("\"etag-persist-1\"", observedETagAfterRestart);
+            var finalCandidate = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, finalCandidate!.State);
+
+            using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
+            var liveRoot = await probeHttp.GetFromJsonAsync<JsonElement>("/");
+            Assert.Equal("2.2.0-resumed", liveRoot.GetProperty("version").GetString());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AutonomousWorker_SupersedesPendingOlderCommit_StopsOnFailedWorkflow_AndRespectsRateLimitBackoff()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"sf-supersede-rl-{Guid.NewGuid():N}");
+        var dataRoot = Path.Combine(root, "agent-data");
+        var appsRoot = Path.Combine(root, "apps");
+        var artifactsDir = Path.Combine(root, "artifacts");
+        Directory.CreateDirectory(dataRoot);
+        Directory.CreateDirectory(appsRoot);
+        Directory.CreateDirectory(artifactsDir);
+
+        await using var targetHost = new LoopbackSampleIisHost();
+        await targetHost.StartAsync();
+
+        try
+        {
+            var (v2Zip, v2Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v2.zip", "2.3.0-superseding", unhealthy: false);
+            var (v4Zip, v4Sha) = await CreateSampleAspNetCoreArtifactAsync(artifactsDir, "v4.zip", "2.4.0-post-ratelimit", unhealthy: false);
+
+            var dbPath = Path.Combine(dataRoot, "agent-state.db");
+            var dbOpts = new DbContextOptionsBuilder<ServerForgeDbContext>().UseSqlite($"Data Source={dbPath}").Options;
+            await using (var initDb = new ServerForgeDbContext(dbOpts))
+                await initDb.InitializeSqliteAsync();
+
+            var factoryMock = new Mock<IDbContextFactory<ServerForgeDbContext>>();
+            factoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => new ServerForgeDbContext(dbOpts));
+
+            var protector = new DpapiSecretProtector(DataProtectionScope.CurrentUser);
+            var store = new ServerForgeStore(factoryMock.Object, protector);
+            var agentOpts = new AgentOptions { DataRoot = dataRoot, AppsRoot = appsRoot };
+            var identityStore = new AgentIdentityStore(agentOpts);
+            identityStore.UpdateState(s => s.ProtectedGitHubPat = protector.Protect("github_pat_supersede_test", "agent:github-pat"));
+
+            var proj = await store.EnsureDefaultProjectAsync("test");
+            var app = new ManagedApplication
+            {
+                ProjectGroupId = proj.Id,
+                ServerId = Guid.NewGuid(),
+                Name = "Supersede & RateLimit App",
+                Slug = "supersede-app",
+                RuntimeType = ApplicationRuntimeType.AspNetCore,
+                RepositoryFullName = "owner/supersede-app",
+                Branch = "main",
+                AutoDeployEnabled = true,
+                RepositoryExplicitlyAuthorized = true,
+                SourceMode = DeploymentSourceMode.GitHubActionsArtifact,
+                GitHubWorkflowFileName = "serverforge-deploy.yml",
+                InternalPort = targetHost.Port,
+                IisSiteName = "ServerForge_E2E_Supersede",
+                IisAppPoolName = "ServerForge_E2E_Supersede_Pool",
+                PrimaryDomain = "localhost",
+                HealthCheckPath = "/health",
+                HealthCheckTimeoutSeconds = 5,
+                AutoRollbackOnFailure = true,
+                ReleasesRootPath = Path.Combine(appsRoot, "supersede-app"),
+                PersistentDataPath = Path.Combine(appsRoot, "supersede-app", "data")
+            };
+            await store.UpsertApplicationAsync(app, "test");
+
+            var adapter = new AspNetCoreDeploymentAdapter(targetHost);
+            using var healthHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var orchestrator = new DeploymentOrchestrator(
+                [adapter], new PathBoundaryGuard(), protector, healthHttp, NullLogger<DeploymentOrchestrator>.Instance, store);
+
+            var currentHead = new GitHubHeadCheckResult(true, CommitV1, "v1 pending", "dev", "\"e1\"", 4900);
+            var headCalls = 0;
+            var v3ArtifactCalls = 0;
+            var v4RateLimitedOnce = true;
+
+            var ghMock = new Mock<IGitHubClient>();
+            ghMock.Setup(g => g.CheckBranchHeadConditionalAsync(It.IsAny<string>(), "owner/supersede-app", "main", It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() =>
+                {
+                    headCalls++;
+                    return currentHead;
+                });
+
+            ghMock.Setup(g => g.DownloadVerifiedWorkflowArtifactAsync(
+                    It.IsAny<string>(), "owner/supersede-app", "main", It.IsAny<string>(), "serverforge-deploy.yml", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string _, string _, string _, string sha, string? _, string _, CancellationToken _) =>
+                {
+                    if (sha == CommitV1)
+                        return new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null, "v1 still building", GitHubArtifactResolutionStatus.WorkflowRunning);
+                    if (sha == CommitV2)
+                        return new GitHubArtifactDownloadResult(true, v2Zip, v2Sha, v2Sha, 7202, 8202, "serverforge-release", "GitHubActionsRun:7202/Artifact:8202", null, GitHubArtifactResolutionStatus.ArtifactVerified);
+                    if (sha == CommitV3Broken)
+                    {
+                        v3ArtifactCalls++;
+                        return new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null, "CI tests failed", GitHubArtifactResolutionStatus.WorkflowFailedOrCancelled);
+                    }
+                    if (sha == CommitV4Recovery)
+                    {
+                        if (v4RateLimitedOnce)
+                        {
+                            v4RateLimitedOnce = false;
+                            return new GitHubArtifactDownloadResult(false, null, null, null, null, null, null, null, "HTTP 429 rate limited", GitHubArtifactResolutionStatus.RateLimited, RetryAfterSeconds: 60, RateLimitRemaining: 0);
+                        }
+                        return new GitHubArtifactDownloadResult(true, v4Zip, v4Sha, v4Sha, 7204, 8204, "serverforge-release", "GitHubActionsRun:7204/Artifact:8204", null, GitHubArtifactResolutionStatus.ArtifactVerified);
+                    }
+                    throw new InvalidOperationException($"Unexpected SHA {sha}");
+                });
+
+            var clock = new ManualTimeProvider(new DateTimeOffset(2026, 11, 20, 12, 0, 0, TimeSpan.Zero));
+            var worker = new GitHubAutoDeployWorker(
+                store, ghMock.Object, orchestrator, protector, identityStore, Options.Create(agentOpts), NullLogger<GitHubAutoDeployWorker>.Instance, clock);
+
+            // 1. Poll 1: CommitV1 detected, workflow running (pending)
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            Assert.Equal(AutonomousCandidateState.WorkflowRunning, (await store.GetAutonomousCandidateAsync(app.Id))!.State);
+
+            // 2. Poll 2: CommitV2 supersedes pending CommitV1 and deploys cleanly!
+            currentHead = new GitHubHeadCheckResult(true, CommitV2, "v2 supersedes v1", "dev", "\"e2\"", 4899);
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            var afterV2 = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.Equal(CommitV2, afterV2!.CommitSha);
+            Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, afterV2.State);
+
+            // 3. Poll 3 & 4: CommitV3Broken fails in CI -> marked terminal WorkflowFailedOrCancelled -> HTTP 304 does NOT re-poll artifact
+            currentHead = new GitHubHeadCheckResult(true, CommitV3Broken, "v3 failed ci", "dev", "\"e3\"", 4898);
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            Assert.Equal(AutonomousCandidateState.WorkflowFailedOrCancelled, (await store.GetAutonomousCandidateAsync(app.Id))!.State);
+            Assert.Equal(1, v3ArtifactCalls);
+
+            currentHead = new GitHubHeadCheckResult(false, null, null, null, "\"e3\"", 4898);
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            Assert.Equal(1, v3ArtifactCalls); // Zero retries on failed workflow!
+
+            // 4. Poll 5: CommitV4Recovery hits GitHub 429 Retry-After: 60s
+            await Task.Delay(1100);
+            currentHead = new GitHubHeadCheckResult(true, CommitV4Recovery, "v4 recovery", "dev", "\"e4\"", 4897);
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            var headCallsAtRateLimit = headCalls;
+
+            // Poll 6 at +30s: MUST be deferred by rate-limit window (ZERO GitHub API calls!)
+            clock.Advance(TimeSpan.FromSeconds(30));
+            currentHead = new GitHubHeadCheckResult(false, null, null, null, "\"e4\"", 4897);
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            Assert.Equal(headCallsAtRateLimit, headCalls);
+
+            // Poll 7 at +65s (past 60s Retry-After): Resumes under HTTP 304 and deploys CommitV4Recovery!
+            clock.Advance(TimeSpan.FromSeconds(35));
+            await worker.PollAuthorizedApplicationsAsync(CancellationToken.None);
+            var afterV4 = await store.GetAutonomousCandidateAsync(app.Id);
+            Assert.Equal(CommitV4Recovery, afterV4!.CommitSha);
+            Assert.Equal(AutonomousCandidateState.DeploymentSucceeded, afterV4.State);
+
+            using var probeHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{targetHost.Port}/") };
+            var liveRoot = await probeHttp.GetFromJsonAsync<JsonElement>("/");
+            Assert.Equal("2.4.0-post-ratelimit", liveRoot.GetProperty("version").GetString());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class ManualTimeProvider(DateTimeOffset initialUtc) : TimeProvider
+    {
+        private DateTimeOffset _now = initialUtc;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+    }
 }

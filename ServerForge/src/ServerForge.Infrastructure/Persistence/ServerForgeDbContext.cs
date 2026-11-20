@@ -25,6 +25,7 @@ public sealed class ServerForgeDbContext : DbContext
     public DbSet<DatabaseServerRecord> DatabaseServers => Set<DatabaseServerRecord>();
     public DbSet<BackupJobRecord> BackupJobs => Set<BackupJobRecord>();
     public DbSet<AuditLogRecord> AuditLogs => Set<AuditLogRecord>();
+    public DbSet<AutonomousDeploymentCandidate> AutonomousDeploymentCandidates => Set<AutonomousDeploymentCandidate>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -97,6 +98,13 @@ public sealed class ServerForgeDbContext : DbContext
         {
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.TimestampUtc);
+        });
+
+        modelBuilder.Entity<AutonomousDeploymentCandidate>(e =>
+        {
+            e.HasKey(x => x.ApplicationId);
+            e.HasIndex(x => x.State);
+            e.HasIndex(x => x.NextEligibleCheckUtc);
         });
     }
 

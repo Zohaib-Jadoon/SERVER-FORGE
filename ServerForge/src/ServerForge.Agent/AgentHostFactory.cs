@@ -220,7 +220,11 @@ public static class AgentHostFactory
         builder.Services.AddSingleton<AcmeCertificateService>();
         builder.Services.AddSingleton<ISqlServerManager, SqlServerManagementService>();
         builder.Services.AddSingleton<IPostgreSqlManager, PostgreSqlManagementService>();
-        builder.Services.AddHttpClient<IGitHubClient, GitHubApiClient>();
+        builder.Services.AddHttpClient<IGitHubClient, GitHubApiClient>()
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+            {
+                AllowAutoRedirect = false
+            });
         builder.Services.AddHttpClient<IServerTelemetryProvider, WindowsTelemetryService>();
         builder.Services.AddHttpClient("DeploymentHealth", c => c.Timeout = TimeSpan.FromSeconds(15));
 
@@ -264,8 +268,9 @@ public static class AgentHostFactory
             // Crash recovery: cleanly fail any deployments interrupted by an Agent restart
             var store = scope.ServiceProvider.GetRequiredService<ServerForgeStore>();
             var recovered = await store.RecoverInterruptedDeploymentsAsync(cancellationToken);
-            if (recovered > 0 && configureSerilog)
-                Log.Warning("Recovered {Count} interrupted deployment(s) after Agent restart; previous healthy releases preserved.", recovered);
+            var recoveredCandidates = await store.RecoverInterruptedAutonomousCandidatesAsync(cancellationToken);
+            if ((recovered > 0 || recoveredCandidates > 0) && configureSerilog)
+                Log.Warning("Recovered {Count} interrupted deployment(s) and {CandidateCount} interrupted autonomous candidate(s) after Agent restart; previous healthy releases preserved.", recovered, recoveredCandidates);
         }
 
         app.UseAuthentication();
@@ -737,6 +742,12 @@ public static class AgentHostFactory
                 Details = $"Backup saved to {file}"
             }, ct);
             return Results.Ok(new { backupFile = file });
+        });
+
+        api.MapGet("/applications/{id:guid}/autonomous-status", async (Guid id, ServerForgeStore store, CancellationToken ct) =>
+        {
+            var candidate = await store.GetAutonomousCandidateAsync(id, ct);
+            return candidate is null ? Results.NotFound() : Results.Ok(candidate);
         });
 
         api.MapGet("/audit", async (ServerForgeStore store, CancellationToken ct) =>

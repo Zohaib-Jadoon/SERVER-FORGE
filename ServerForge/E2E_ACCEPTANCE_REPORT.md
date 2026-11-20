@@ -1,8 +1,8 @@
-# ServerForge — End-to-End Acceptance Report (Phase 12.1)
+# ServerForge — End-to-End Acceptance Report (Phase 12.2)
 
 **Last Updated:** 2026-11-20  
-**Last Verified Windows CI Baseline:** Commit `b97cdfd56c5605a598620fee9683ac5ea56ea6f2` — GitHub Actions Run `44715138404` (**PASS**: `38/38` xUnit tests, Desktop & Agent installers built, SHA-256 verified, `50/50` installer smoke assertions)  
-**Current Phase 12.1 Working State:** Server-side GitHub artifact provenance enforcement, hardened `e2e-disposable-iis.yml`, split TEST A / TEST B disposable IIS harness, and `+4` security/provenance xUnit tests (`42` total) — **Pending Windows CI Run #10**
+**Last Verified Windows CI Baseline:** Commit `5226d810789413e01775c9e9f4e0348d080e6b61` — GitHub Actions Run `44720053575` (**PASS**: `42/42` xUnit tests including server-side GitHub provenance rejection, Desktop & Agent installers built, SHA-256 verified, `50/50` installer smoke assertions)  
+**Current Phase 12.2 Working State:** Autonomous GitHub ETag/artifact-readiness decoupling (SQLite schema v3), strict workflow-ID path resolution & artifact/redirect/ZIP hardening (`GitHubApiClient`), single safe disposable IIS entry point (`run-disposable-iis-acceptance.ps1`), corrected runbook parameters/marker, and `+6` regression xUnit tests (`48` total, `0` skipped) — **Pending Windows CI Run #11**
 
 ---
 
@@ -10,51 +10,36 @@
 
 | Gate | Scope | Current Status | Evidence / Blocker |
 | --- | --- | --- | --- |
-| **Gate 1 — Windows Build, Automated Tests & Installers** | Native `.NET 10` WPF + Agent build, xUnit suite, Inno Setup installers, SHA-256 checksums, 50/50 installer smoke tests | **VERIFIED AT RUN #9 (`38/38` + `50/50`) — PHASE 12.1 (`42` TESTS) PENDING CI RUN #10** | Run `44715138404` (`b97cdfd56c5605a598620fee9683ac5ea56ea6f2`) GREEN; Phase 12.1 security provenance changes ready for push |
-| **Gate 2 — TEST A: Locally Built Sample Artifact on Actual Windows IIS** | Real IIS site/AppPool (`appcmd`, `w3wp.exe`, `AspNetCoreModuleV2`), `ManualSignedPackage` (`LOCAL TEST ARTIFACT`), v1 → v2 → HTTP 503 auto-rollback → Agent restart resilience | **BLOCKED — NO DISPOSABLE WINDOWS IIS VM ATTACHED** | Cannot execute IIS inside Linux container; never run against production IIS. Run `setup-disposable-iis.ps1` + `run-deployment-tests.ps1` + `verify-rollback.ps1` on a disposable Windows Server IIS VM |
-| **Gate 3 — TEST B: Genuine Autonomous GitHub Actions Deployment & Rollback** | Dedicated disposable GitHub repo, root `.github/workflows/serverforge-deploy.yml`, test-only PAT, Desktop closed, ZERO `/api/v1/deployments/trigger` calls, real `GitHubAutoDeployWorker` v1 → v2 → unhealthy v3 rollback → non-retry after restart → v4 recovery | **BLOCKED — NO DISPOSABLE WINDOWS IIS VM / DISPOSABLE GITHUB REPO EXECUTED YET** | Dedicated `run-github-autonomous-test.ps1` implemented covering all 18 steps; awaiting execution on a disposable Windows IIS VM with a disposable test repo |
+| **Gate 1 — Windows Build, Automated Tests & Installers** | Native `.NET 10` WPF + Agent build, xUnit suite, Inno Setup installers, SHA-256 checksums, 50/50 installer smoke tests | **VERIFIED AT RUN #10 (`42/42` + `50/50`) — PHASE 12.2 (`48` TESTS) PENDING CI RUN #11** | Run `44720053575` (`5226d810789413e01775c9e9f4e0348d080e6b61`) GREEN; Phase 12.2 polling & provenance fixes ready for push |
+| **Gate 2 — TEST A: Locally Built Sample Artifact on Actual Windows IIS** | Real IIS site/AppPool (`appcmd`, `w3wp.exe`, `AspNetCoreModuleV2`), `ManualSignedPackage` (`LOCAL TEST ARTIFACT`), v1 → v2 → HTTP 503 auto-rollback → Agent restart resilience | **BLOCKED — NO DISPOSABLE WINDOWS IIS VM ATTACHED** | Cannot execute IIS inside Linux container; never run against production IIS. Run `run-disposable-iis-acceptance.ps1` (or step scripts with exact required flags) on a disposable Windows Server IIS VM marked `SERVERFORGE_DISPOSABLE_E2E_HOST=true` |
+| **Gate 3 — TEST B: Genuine Autonomous GitHub Actions Deployment & Rollback** | Dedicated disposable GitHub repo, root `.github/workflows/serverforge-deploy.yml`, test-only PAT, Desktop closed, ZERO `/api/v1/deployments/trigger` calls, real `GitHubAutoDeployWorker` v1 → v2 → unhealthy v3 rollback → non-retry after restart → v4 recovery | **BLOCKED — NO DISPOSABLE WINDOWS IIS VM / DISPOSABLE GITHUB REPO EXECUTED YET** | `run-disposable-iis-acceptance.ps1 -IncludeTestB` / `run-github-autonomous-test.ps1` exercises the Phase 12.2 HTTP 304 decoupled polling worker; awaiting execution on a disposable Windows IIS VM with a disposable test repo |
 | **Gate 4 — Interactive Windows 11 WPF Desktop Acceptance** | Real Windows 11 GUI session across all 13 native WPF screens, setup wizard, pairing, backups, themes, close-to-tray, reopen, exit | **NOT VERIFIED** | Structured checklist ready in `ServerForge/WINDOWS_DESKTOP_ACCEPTANCE.md`; requires real Windows 11 interactive desktop testing |
 
-**Production Readiness Determination:** **NOT PRODUCTION-READY** until Gates 1 (CI Run #10), 2 (TEST A), 3 (TEST B), and 4 (Windows 11 GUI) all record real passing evidence.
+**Production Readiness Determination:** **NOT PRODUCTION-READY** until Gates 1 (CI Run #11), 2 (TEST A), 3 (TEST B), and 4 (Windows 11 GUI) all record real passing evidence.
 
 ---
 
-## Phase 12.1 Critical Review Findings Addressed
+## Phase 12.2 Critical Fixes & Acceptance Improvements
 
-### Finding 1 — Honest Split Between TEST A and TEST B
-- **TEST A (`ServerForge/scripts/e2e/run-deployment-tests.ps1` + `verify-rollback.ps1`)**:
-  - Registers the disposable app strictly in `DeploymentSourceMode.ManualSignedPackage` (`SourceMode = 2`, `AutoDeployEnabled = false`).
-  - Explicitly passes `TriggeredAutomatically = false` and `ArtifactTrustSource = 'LOCAL TEST ARTIFACT (ManualSignedPackage)'`.
-  - Records `"gitHubLivePollTested": false` and `"provesAutonomousGitHubPolling": false` in `deployment-evidence.json`.
-  - Includes a live negative security probe (`TESTA.SEC.1`) confirming a `GitHubActionsArtifact` app rejects caller-supplied local ZIP paths with HTTP `400`.
-- **TEST B (`ServerForge/scripts/e2e/run-github-autonomous-test.ps1`)**:
-  - Uses a dedicated disposable GitHub repo containing root `.github/workflows/serverforge-deploy.yml` and `release-config.json`.
-  - Syncs a test-only `E2E_DISPOSABLE_GITHUB_PAT` (never logged or saved in `.git/config`) to the Agent's DPAPI store.
-  - Makes **ZERO calls** to `POST /api/v1/deployments/trigger`.
-  - Pushes real commits via GitHub Contents API (`v1` healthy → `v2` healthy → `v3` unhealthy `simulateUnhealthy=true` → `v4` healthy recovery), waits for real GitHub Actions runs/artifacts, proves `GitHubAutoDeployWorker` deploys with Desktop closed, verifies HTTP 503 auto-rollback to `v2`, restarts the Agent to prove zero endless retries on `v3`, and records real `workflowRunId`, `artifactId`, `commitSha`, and `deploymentId` values in `github-autonomous-evidence.json`.
+### Priority 1 — Decoupled Autonomous GitHub ETag vs Durable Artifact-Readiness State
+- Fixed the real-world polling deadlock in `GitHubAutoDeployWorker.cs` where caching a new branch HEAD ETag before GitHub Actions finished caused subsequent `HTTP 304 Not Modified` responses to skip artifact-readiness checks indefinitely.
+- Introduced durable SQLite schema v3 (`AutonomousDeploymentCandidates` table, `SqliteSchemaMigrator.LatestSchemaVersion = 3` with automatic `.bak` pre-upgrade snapshots on v0/v1/v2 → v3 upgrades) storing per-application `CommitSha`, `Branch`, `LastBranchHeadETag`, `AutonomousCandidateState`, `WorkflowRunId`, `ArtifactId`, `ArtifactName`, `DeploymentId`, `AttemptCount`, `ConsecutiveTransientErrors`, `NextEligibleCheckUtc`, and scrubbed `LastStatusMessage`.
+- Pending commits keep polling workflow/artifact readiness even when all subsequent branch-head requests return **HTTP 304 Not Modified**, survive Agent restarts (`RecoverInterruptedAutonomousCandidatesAsync` preserves pending artifact waits while marking interrupted `DeploymentRunning` candidates terminal), allow newer commits to supersede older pending commits, apply bounded backoff & respect `Retry-After`/`X-RateLimit-Reset`, prevent duplicate/in-flight/endless retries, and expose read-only mTLS endpoint `GET /api/v1/applications/{id}/autonomous-status`.
 
-### Finding 2 — Server-Side GitHub Artifact Provenance Trust Boundary
-- Added `IGitHubArtifactProvenanceVerifier` (`AgentGitHubProvenanceVerifier`) wired into `DeploymentOrchestrator` and `AgentHostFactory`.
-- `POST /api/v1/deployments/trigger`:
-  - **Rejects** (`HTTP 400`) any caller-supplied `ArtifactDownloadUrl` when `SourceMode == GitHubActionsArtifact`.
-  - **Forces** `TriggeredAutomatically = false` on all external HTTP API calls so callers can never spoof autonomous polling.
-- `DeploymentOrchestrator`:
-  - In `GitHubActionsArtifact` mode, **fails closed** without a server-side `IGitHubArtifactProvenanceVerifier` (or in-process `VerifiedGitHubArtifact` from `GitHubAutoDeployWorker`), rejects caller-supplied paths/URLs, validates caller-supplied run/artifact IDs and digests against GitHub API truth, and verifies computed SHA-256 against the GitHub API digest.
-  - In `ManualSignedPackage` mode, rejects remote HTTP/HTTPS URLs and invalid hashes, and normalizes trust labels so local packages can never masquerade as verified GitHub Actions provenance.
-- `GitHubApiClient`:
-  - Enforces HTTPS GitHub host allowlisting (`api.github.com` / `github.com`) on `archive_download_url`.
+### Priority 2 — Strict Workflow & Artifact Identity, Safe Redirects & Archive Validation (`GitHubApiClient.cs`)
+- Enforces exact authorized `owner/repo`, exact branch + 40-char commit SHA, and exact non-blank workflow path — explicitly resolving `GET repos/{repo}/actions/workflows/{workflow_id}` whenever `path` is omitted from workflow run list responses (never silently accepting missing `path` or suffix spoofing).
+- Classifies `WorkflowNotStarted`, `WorkflowRunning`, `WorkflowSucceededArtifactPending`, `WorkflowFailedOrCancelled`, `RateLimited`, `TransientApiError`, and `ProvenanceRejected`.
+- Strict artifact selection (`SelectAuthorizedArtifact`) fails closed on ambiguous multi-artifact runs instead of blindly selecting the first artifact.
+- Configures `AllowAutoRedirect = false` on `IGitHubClient`, validates HTTPS redirects against `*.githubusercontent.com` / `*.blob.core.windows.net` while stripping `Authorization: Bearer <PAT>` on redirects, enforces `512 MB` compressed / `2 GB` uncompressed caps, handles truncated `Content-Length` downloads with bounded transient retries, verifies SHA-256 **before** ZIP parsing, and validates ZIP archive integrity (`ValidateDownloadedZipArchive` rejects corrupt ZIPs, empty ZIPs, Zip Slip `..`, and zip bombs).
 
-### Finding 3 — Hardened Optional Disposable IIS Workflow (`/.github/workflows/e2e-disposable-iis.yml`)
-- Triggered **ONLY** via manual `workflow_dispatch`.
-- Pre-dispatch validation job (`validate-inputs-and-runner`) passes all inputs via environment variables (zero direct `${{ inputs.* }}` interpolation inside shell/PowerShell code), validates `owner/repo` regex, branch regex, unprivileged non-conflicting ports (`1024..65535`, never `80`, `443`, or `9443`), and rejects `windows-latest` or any production-like runner label.
-- Requires GitHub Environment approval (`disposable-windows-iis-e2e`), targets `[self-hosted, windows, <approved_runner_label>]`, and enforces a positive host identity marker (`C:\ProgramData\ServerForgeE2E\DISPOSABLE_IIS_E2E_HOST.marker`) plus absence of production `ServerForgeAgent` services/identity files.
+### Priority 3 — Single Safe Disposable IIS Entry Point & Corrected Runbook
+- Added `ServerForge/scripts/e2e/run-disposable-iis-acceptance.ps1` (PowerShell 5.1/7 compatible): requires `-AgentInstallerPath` and `-ConfirmDisposableHost`, enforces exact host marker `SERVERFORGE_DISPOSABLE_E2E_HOST=true`, executes `setup-disposable-iis.ps1` (including `preflight.ps1`), `run-deployment-tests.ps1`, `verify-rollback.ps1`, optional `-IncludeTestB` (`run-github-autonomous-test.ps1`), collects sanitized diagnostics on failure, and guarantees owned-only `cleanup-disposable-iis.ps1` in `finally`.
+- Updated `ServerForge/DISPOSABLE_IIS_TEST_GUIDE.md` so every manual step command passes all exact mandatory parameters (`-RunId`, `-AgentInstallerPath`, `-ManifestPath`, `-GitHubRepo`, `-WorkspaceRoot`) and uses exact marker value `SERVERFORGE_DISPOSABLE_E2E_HOST=true`.
 
-### Phase 12.1A — E2E Harness PowerShell 5.1 & 7 Audit Fixes
-- Fixed `E2ECommon.psm1` for Windows PowerShell 5.1 (.NET Framework 4.8) AND PowerShell 7 (.NET 8+) compatibility:
-  - Explicit `[string]::Empty` password overload on `X509Certificate2` constructor.
-  - Per-request fail-closed `WebRequestHandler.ServerCertificateValidationCallback` fallback when `HttpClientHandler.ServerCertificateCustomValidationCallback` is unavailable on PowerShell 5.1.
-- Fixed sample app workflow `.github/workflows/serverforge-deploy.yml` to upload flat `./publish-out/**` files (avoiding nested zip-inside-zip) and read `release-config.json` without direct `${{ inputs.* }}` PowerShell interpolation.
-- Extended `cleanup-disposable-iis.ps1` to remove both TEST A (`ServerForge_E2E_<RunId>`) and TEST B (`ServerForge_E2E_<RunId>_GH`) owned sites/AppPools while asserting ownership prefixes and preserving all pre-existing sites.
+### Preserved Phase 12.1 Controls (Verified in CI Run #10 `44720053575`)
+- **TEST A (`run-deployment-tests.ps1` + `verify-rollback.ps1`)** stays strictly `ManualSignedPackage` (`LOCAL TEST ARTIFACT`, `TriggeredAutomatically = false`, `gitHubLivePollTested = false`) with live negative provenance probe `TESTA.SEC.1`, on-disk `web.config` check, and Agent restart resilience.
+- **TEST B (`run-github-autonomous-test.ps1`)** makes ZERO calls to `/api/v1/deployments/trigger` and drives real GitHub Actions runs (`v1 → v2 → v3-unhealthy → v4-recovery`) with Desktop closed.
+- **Hardened Optional Workflow (`/.github/workflows/e2e-disposable-iis.yml`)** remains `workflow_dispatch`-only with zero `${{ inputs.* }}` shell interpolation, `disposable-windows-iis-e2e` environment approval, and `SERVERFORGE_DISPOSABLE_E2E_HOST=true` verification.
 
 ---
 

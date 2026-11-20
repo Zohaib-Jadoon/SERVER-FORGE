@@ -79,3 +79,16 @@ public enum LogCategory
     GitHub = 7,
     Audit = 8
 }
+
+public enum AutonomousCandidateState
+{
+    CommitDetected = 0,
+    WorkflowNotStarted = 1,
+    WorkflowRunning = 2,
+    WorkflowSucceededArtifactPending = 3,
+    ArtifactVerified = 4,
+    DeploymentRunning = 5,
+    DeploymentSucceeded = 6,
+    WorkflowFailedOrCancelled = 7,
+    DeploymentFailedTerminal = 8
+}

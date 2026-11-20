@@ -138,6 +138,36 @@ public interface IGitHubClient
         string? expectedWorkflowFileName,
         string destinationZipPath,
         CancellationToken ct);
+
+    Task<GitHubArtifactDownloadResult> DownloadVerifiedWorkflowArtifactAsync(
+        string personalAccessToken,
+        string repositoryFullName,
+        string branch,
+        string commitSha,
+        string? expectedWorkflowFileName,
+        string? expectedArtifactName,
+        string destinationZipPath,
+        CancellationToken ct)
+        => DownloadVerifiedWorkflowArtifactAsync(
+            personalAccessToken,
+            repositoryFullName,
+            branch,
+            commitSha,
+            expectedWorkflowFileName,
+            destinationZipPath,
+            ct);
+}
+
+public enum GitHubArtifactResolutionStatus
+{
+    ArtifactVerified = 0,
+    WorkflowNotStarted = 1,
+    WorkflowRunning = 2,
+    WorkflowSucceededArtifactPending = 3,
+    WorkflowFailedOrCancelled = 4,
+    TransientApiError = 5,
+    RateLimited = 6,
+    ProvenanceRejected = 7
 }
 
 public sealed record GitHubTokenValidationResult(
@@ -171,7 +201,10 @@ public sealed record GitHubHeadCheckResult(
     string? CommitMessage,
     string? CommitAuthor,
     string? ETag,
-    int RateLimitRemaining);
+    int RateLimitRemaining,
+    DateTimeOffset? RateLimitResetUtc = null,
+    int? RetryAfterSeconds = null,
+    bool IsRateLimited = false);
 
 public sealed record GitHubArtifactDownloadResult(
     bool Found,
@@ -182,7 +215,10 @@ public sealed record GitHubArtifactDownloadResult(
     long? ArtifactId,
     string? ArtifactName,
     string? TrustSource,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    GitHubArtifactResolutionStatus ResolutionStatus = GitHubArtifactResolutionStatus.WorkflowNotStarted,
+    int? RetryAfterSeconds = null,
+    int? RateLimitRemaining = null);
 
 public interface ISqlServerManager
 {

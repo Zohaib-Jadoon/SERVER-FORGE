@@ -1,9 +1,9 @@
-# ServerForge — Interactive Windows 11 Desktop GUI Acceptance Checklist (Phase 12.1)
+# ServerForge — Interactive Windows 11 Desktop GUI Acceptance Checklist (Phase 12.2)
 
 **Current Status:** **NOT VERIFIED**  
 **Reason:** Interactive WPF visual, tray, dialog, and multi-screen rendering checks require a real Windows 11 desktop session with an interactive logged-in user. No automated headless test or Linux container can substitute for this gate.
 
-**Target Build Under Test:** `ServerForge-Desktop-Setup.exe` (verified in CI Run #9 `44715138404`; re-test with CI Run #10 after Phase 12.1 push)  
+**Target Build Under Test:** `ServerForge-Desktop-Setup.exe` (verified in CI Run #10 `44720053575`; re-test with CI Run #11 after Phase 12.2 push)  
 **Native Technology Preserved:** Pure `.NET 10 LTS` WPF (`ServerForge.Desktop`, 13 native WPF pages + Windows Forms `NotifyIcon` system tray; zero React/Electron/WebView).
 
 ---

@@ -634,4 +634,63 @@ public sealed class ServerForgeStore : IDeploymentStatePersistence
         var paged = skip > 0 ? ordered.Skip(skip).Take(take) : ordered.Take(take);
         return await paged.ToListAsync(ct);
     }
+
+    // ---- Durable Autonomous GitHub Candidate State (Phase 12.2) ----
+
+    public async Task<AutonomousDeploymentCandidate?> GetAutonomousCandidateAsync(Guid applicationId, CancellationToken ct = default)
+    {
+        if (applicationId == Guid.Empty) return null;
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.AutonomousDeploymentCandidates
+            .AsNoTracking()
+            .FirstOrDefaultAsync(c => c.ApplicationId == applicationId, ct);
+    }
+
+    public async Task<IReadOnlyList<AutonomousDeploymentCandidate>> GetAllAutonomousCandidatesAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        return await db.AutonomousDeploymentCandidates
+            .AsNoTracking()
+            .OrderByDescending(c => c.UpdatedAtUtc)
+            .ToListAsync(ct);
+    }
+
+    public async Task UpsertAutonomousCandidateAsync(AutonomousDeploymentCandidate candidate, CancellationToken ct = default)
+    {
+        if (candidate.ApplicationId == Guid.Empty)
+            throw new ArgumentException("AutonomousDeploymentCandidate.ApplicationId cannot be Guid.Empty.", nameof(candidate));
+
+        candidate.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var existing = await db.AutonomousDeploymentCandidates.FindAsync([candidate.ApplicationId], ct);
+        if (existing is null)
+            db.AutonomousDeploymentCandidates.Add(candidate);
+        else
+            db.Entry(existing).CurrentValues.SetValues(candidate);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Marks any autonomous candidates left in DeploymentRunning during an unexpected Agent restart as
+    /// DeploymentFailedTerminal while preserving pending artifact-waiting candidates so polling resumes cleanly.
+    /// </summary>
+    public async Task<int> RecoverInterruptedAutonomousCandidatesAsync(CancellationToken ct = default)
+    {
+        await using var db = await _factory.CreateDbContextAsync(ct);
+        var interrupted = await db.AutonomousDeploymentCandidates
+            .Where(c => c.State == AutonomousCandidateState.DeploymentRunning)
+            .ToListAsync(ct);
+
+        foreach (var c in interrupted)
+        {
+            c.State = AutonomousCandidateState.DeploymentFailedTerminal;
+            c.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            c.LastStatusMessage = "Autonomous deployment was interrupted by an Agent restart; terminal policy applied to prevent automatic retry loop.";
+        }
+
+        if (interrupted.Count > 0)
+            await db.SaveChangesAsync(ct);
+
+        return interrupted.Count;
+    }
 }

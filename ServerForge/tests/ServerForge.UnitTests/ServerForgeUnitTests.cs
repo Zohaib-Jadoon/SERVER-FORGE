@@ -984,7 +984,7 @@ public sealed class DeploymentAndPersistenceTests
                 Assert.False(migrationResult.WasFreshDatabase);
                 Assert.Equal(0, migrationResult.PreviousVersion);
                 Assert.Equal(SqliteSchemaMigrator.LatestSchemaVersion, migrationResult.CurrentVersion);
-                Assert.Equal(new[] { 1, 2 }, migrationResult.AppliedVersions);
+                Assert.Equal(new[] { 1, 2, 3 }, migrationResult.AppliedVersions);
                 Assert.True(migrationResult.NormalizedTimestampCount >= 10);
                 Assert.NotNull(migrationResult.BackupFilePath);
                 Assert.True(File.Exists(migrationResult.BackupFilePath!));
@@ -1030,6 +1030,19 @@ public sealed class DeploymentAndPersistenceTests
                 DestinationPath = @"C:\Backups"
             }, "unit-test");
             Assert.Single(await store.GetBackupJobsAsync());
+
+            // Phase 12.2 AutonomousDeploymentCandidates table was safely added during v3 upgrade
+            await store.UpsertAutonomousCandidateAsync(new AutonomousDeploymentCandidate
+            {
+                ApplicationId = appId,
+                CommitSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Branch = "main",
+                LastBranchHeadETag = "\"legacy-etag\"",
+                State = AutonomousCandidateState.WorkflowRunning
+            });
+            var upgradedCandidate = await store.GetAutonomousCandidateAsync(appId);
+            Assert.NotNull(upgradedCandidate);
+            Assert.Equal(AutonomousCandidateState.WorkflowRunning, upgradedCandidate!.State);
 
             // Re-running InitializeSqliteAsync after upgrade is idempotent (no new backup)
             await using (var recheckDb = new ServerForgeDbContext(legacyOpts))
@@ -1423,6 +1436,295 @@ public sealed class DeploymentAndPersistenceTests
             Assert.False(res.Found);
             Assert.Contains("untrusted", res.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
             Assert.False(File.Exists(destPath));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task GitHubApiClient_ResolvesMissingWorkflowPathByWorkflowId_AndRejectsUnmatchedOrMissingWorkflowIdentity()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-gh-wfid-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var validZip = Path.Combine(tempRoot, "valid-source.zip");
+        CreateSampleStaticZip(validZip, "<html><body>v1</body></html>");
+        var validZipBytes = await File.ReadAllBytesAsync(validZip);
+        var validSha = await SafeProcessRunner.ComputeFileSha256Async(validZip);
+
+        try
+        {
+            // 1. Blank expectedWorkflowFileName -> fail closed immediately
+            var blankWfClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(_ => throw new InvalidOperationException("Should not call API"))),
+                NullLogger<GitHubApiClient>.Instance);
+            var blankRes = await blankWfClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "", Path.Combine(tempRoot, "blank.zip"), CancellationToken.None);
+            Assert.False(blankRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.ProvenanceRejected, blankRes.ResolutionStatus);
+
+            // 2. Missing `path` on run list AND no workflow_id -> MUST NOT silently accept!
+            var missingPathNoIdClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent($$"""{"workflow_runs":[{"id":910,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main"}]}""")
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var missingNoIdRes = await missingPathNoIdClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "noid.zip"), CancellationToken.None);
+            Assert.False(missingNoIdRes.Found);
+
+            // 3. Suffix-spoofed workflow path (`evil-serverforge-deploy.yml`) -> MUST fail closed
+            Assert.False(GitHubApiClient.IsExactWorkflowPathMatch(".github/workflows/evil-serverforge-deploy.yml", "serverforge-deploy.yml"));
+            Assert.True(GitHubApiClient.IsExactWorkflowPathMatch(".github/workflows/serverforge-deploy.yml", "serverforge-deploy.yml"));
+
+            // 4. Missing `path` on run list WITH `workflow_id` -> explicitly resolves `/actions/workflows/{id}` and succeeds!
+            var resolvedWorkflowEndpointCalled = false;
+            var resolveByIdClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent($$"""{"workflow_runs":[{"id":911,"workflow_id":555,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","repository":{"full_name":"owner/repo"}}]}""")
+                        };
+                    if (uri.Contains("/actions/workflows/555"))
+                    {
+                        resolvedWorkflowEndpointCalled = true;
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent("""{"id":555,"path":".github/workflows/serverforge-deploy.yml"}""")
+                        };
+                    }
+                    if (uri.Contains("/artifacts"))
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent($$"""{"artifacts":[{"id":556,"name":"serverforge-release","expired":false,"size_in_bytes":{{validZipBytes.Length}},"digest":"sha256:{{validSha}}","workflow_run":{"id":911},"archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/556/zip"}]}""")
+                        };
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(validZipBytes) };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+
+            var resolvedDest = Path.Combine(tempRoot, "resolved.zip");
+            var resolvedRes = await resolveByIdClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", resolvedDest, CancellationToken.None);
+            Assert.True(resolvedWorkflowEndpointCalled);
+            Assert.True(resolvedRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.ArtifactVerified, resolvedRes.ResolutionStatus);
+            Assert.Equal(911L, resolvedRes.WorkflowRunId);
+            Assert.Equal(556L, resolvedRes.ArtifactId);
+            Assert.True(File.Exists(resolvedDest));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task GitHubApiClient_EnforcesStrictArtifactSelectionPolicy_SizeLimit_ZipValidation_AndSafeRedirects()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-gh-strict-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var validZip = Path.Combine(tempRoot, "valid-source.zip");
+        CreateSampleStaticZip(validZip, "<html><body>redirected</body></html>");
+        var validZipBytes = await File.ReadAllBytesAsync(validZip);
+        var validSha = await SafeProcessRunner.ComputeFileSha256Async(validZip);
+
+        try
+        {
+            // 1. Ambiguous multi-artifact run without expected name or canonical serverforge-* name -> fail closed!
+            var ambiguousClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":920,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent($$"""{"artifacts":[{"id":1,"name":"coverage-report","expired":false,"size_in_bytes":100,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/dl/1"},{"id":2,"name":"debug-logs","expired":false,"size_in_bytes":100,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/dl/2"}]}""")
+                    };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var ambRes = await ambiguousClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "amb.zip"), CancellationToken.None);
+            Assert.False(ambRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.ProvenanceRejected, ambRes.ResolutionStatus);
+            Assert.Contains("Ambiguous", ambRes.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 2. Trusted 302 redirect to *.githubusercontent.com strips Authorization header and downloads cleanly
+            bool? redirectHadAuthHeader = null;
+            var redirectClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":921,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    if (uri.Contains("/artifacts") && !uri.EndsWith("/zip"))
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent($$"""{"artifacts":[{"id":20,"name":"coverage","expired":false,"size_in_bytes":50,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/20/zip"},{"id":21,"name":"serverforge-sample-app-win-x64","expired":false,"size_in_bytes":{{validZipBytes.Length}},"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/21/zip"}]}""")
+                        };
+                    if (uri.StartsWith("https://api.github.com/repos/owner/repo/actions/artifacts/21/zip"))
+                    {
+                        var r = new HttpResponseMessage(HttpStatusCode.Found);
+                        r.Headers.Location = new Uri("https://pipelinesghubeus1.actions.githubusercontent.com/sas/pkg.zip?sig=test");
+                        return r;
+                    }
+                    redirectHadAuthHeader = req.Headers.Authorization is not null;
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(validZipBytes) };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var redirDest = Path.Combine(tempRoot, "redir.zip");
+            var redirRes = await redirectClient.DownloadVerifiedWorkflowArtifactAsync(
+                "secret-pat-never-forward", "owner/repo", "main", Commit1, "serverforge-deploy.yml", redirDest, CancellationToken.None);
+            Assert.True(redirRes.Found);
+            Assert.Equal(21L, redirRes.ArtifactId);
+            Assert.False(redirectHadAuthHeader);
+
+            // 3. Untrusted 302 redirect target (evil host or IP literal) -> fail closed!
+            var evilRedirectClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":922,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    if (uri.Contains("/artifacts") && !uri.EndsWith("/zip"))
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent($$"""{"artifacts":[{"id":22,"name":"serverforge-release","expired":false,"size_in_bytes":{{validZipBytes.Length}},"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/22/zip"}]}""")
+                        };
+                    var r = new HttpResponseMessage(HttpStatusCode.Found);
+                    r.Headers.Location = new Uri("https://evil.example.com/malicious.zip");
+                    return r;
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var evilRedirRes = await evilRedirectClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "evil-redir.zip"), CancellationToken.None);
+            Assert.False(evilRedirRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.ProvenanceRejected, evilRedirRes.ResolutionStatus);
+            Assert.Contains("redirect", evilRedirRes.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 4. Oversized artifact exceeding MaxArtifactDownloadBytes -> fail closed!
+            var oversizeClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":923,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent($$"""{"artifacts":[{"id":23,"name":"serverforge-release","expired":false,"size_in_bytes":999999,"digest":"sha256:{{validSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/23/zip"}]}""")
+                    };
+                })),
+                NullLogger<GitHubApiClient>.Instance)
+            {
+                MaxArtifactDownloadBytes = 1024
+            };
+            var oversizeRes = await oversizeClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "oversize.zip"), CancellationToken.None);
+            Assert.False(oversizeRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.ProvenanceRejected, oversizeRes.ResolutionStatus);
+            Assert.Contains("exceeds maximum", oversizeRes.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
+
+            // 5. Non-ZIP payload whose SHA-256 matches digest -> rejected by archive integrity check!
+            var nonZipBytes = System.Text.Encoding.UTF8.GetBytes("not a zip archive at all");
+            var nonZipTemp = Path.Combine(tempRoot, "raw.bin");
+            await File.WriteAllBytesAsync(nonZipTemp, nonZipBytes);
+            var nonZipSha = await SafeProcessRunner.ComputeFileSha256Async(nonZipTemp);
+            var nonZipClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    var uri = req.RequestUri!.AbsoluteUri;
+                    if (uri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":924,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    if (uri.Contains("/artifacts") && !uri.EndsWith("/zip"))
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent($$"""{"artifacts":[{"id":24,"name":"serverforge-release","expired":false,"size_in_bytes":{{nonZipBytes.Length}},"digest":"sha256:{{nonZipSha}}","archive_download_url":"https://api.github.com/repos/owner/repo/actions/artifacts/24/zip"}]}""")
+                        };
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(nonZipBytes) };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var nonZipDest = Path.Combine(tempRoot, "corrupt.zip");
+            var nonZipRes = await nonZipClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", nonZipDest, CancellationToken.None);
+            Assert.False(nonZipRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.ProvenanceRejected, nonZipRes.ResolutionStatus);
+            Assert.False(File.Exists(nonZipDest));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task GitHubApiClient_ClassifiesRunning_PendingArtifact_FailedWorkflow_AndRateLimitStatesAccurately()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"sf-gh-states-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            // 1. In-progress workflow run -> WorkflowRunning
+            var runningClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent($$"""{"workflow_runs":[{"id":930,"status":"in_progress","conclusion":null,"head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""")
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var runningRes = await runningClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "run.zip"), CancellationToken.None);
+            Assert.False(runningRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.WorkflowRunning, runningRes.ResolutionStatus);
+
+            // 2. Completed success run with empty artifact list -> WorkflowSucceededArtifactPending
+            var pendingArtClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(req =>
+                {
+                    if (req.RequestUri!.AbsoluteUri.Contains("/actions/runs?"))
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent($$"""{"workflow_runs":[{"id":931,"status":"completed","conclusion":"success","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""") };
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"artifacts":[]}""") };
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var pendingRes = await pendingArtClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "pend.zip"), CancellationToken.None);
+            Assert.False(pendingRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.WorkflowSucceededArtifactPending, pendingRes.ResolutionStatus);
+
+            // 3. Completed failed run -> WorkflowFailedOrCancelled
+            var failedClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent($$"""{"workflow_runs":[{"id":932,"status":"completed","conclusion":"cancelled","head_sha":"{{Commit1}}","head_branch":"main","path":".github/workflows/serverforge-deploy.yml"}]}""")
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var failedRes = await failedClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "fail.zip"), CancellationToken.None);
+            Assert.False(failedRes.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.WorkflowFailedOrCancelled, failedRes.ResolutionStatus);
+
+            // 4. Rate limited HTTP 429 with Retry-After: 45
+            var rlClient = new GitHubApiClient(
+                new HttpClient(new StubHttpHandler(_ =>
+                {
+                    var r = new HttpResponseMessage((HttpStatusCode)429);
+                    r.Headers.TryAddWithoutValidation("Retry-After", "45");
+                    r.Headers.TryAddWithoutValidation("X-RateLimit-Remaining", "0");
+                    return r;
+                })),
+                NullLogger<GitHubApiClient>.Instance);
+            var headRl = await rlClient.CheckBranchHeadConditionalAsync("pat", "owner/repo", "main", "\"etag-1\"", CancellationToken.None);
+            Assert.True(headRl.IsRateLimited);
+            Assert.Equal(45, headRl.RetryAfterSeconds);
+
+            var artRl = await rlClient.DownloadVerifiedWorkflowArtifactAsync(
+                "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", Path.Combine(tempRoot, "rl.zip"), CancellationToken.None);
+            Assert.False(artRl.Found);
+            Assert.Equal(GitHubArtifactResolutionStatus.RateLimited, artRl.ResolutionStatus);
+            Assert.Equal(45, artRl.RetryAfterSeconds);
         }
         finally
         {

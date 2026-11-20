@@ -185,3 +185,30 @@ public sealed class AuditLogRecord
     public Guid? ServerId { get; set; }
     public Guid? ApplicationId { get; set; }
 }
+
+/// <summary>
+/// Durable per-application autonomous GitHub deployment candidate state.
+/// Decouples conditional branch-head ETag tracking from workflow/artifact readiness so HTTP 304
+/// responses never skip unresolved commits and pending candidates survive Agent restarts.
+/// </summary>
+public sealed class AutonomousDeploymentCandidate
+{
+    public Guid ApplicationId { get; set; }
+    public string CommitSha { get; set; } = string.Empty;
+    public string Branch { get; set; } = string.Empty;
+    public string? CommitMessage { get; set; }
+    public string? CommitAuthor { get; set; }
+    public string? LastBranchHeadETag { get; set; }
+    public AutonomousCandidateState State { get; set; } = AutonomousCandidateState.CommitDetected;
+    public long? WorkflowRunId { get; set; }
+    public long? ArtifactId { get; set; }
+    public string? ArtifactName { get; set; }
+    public Guid? DeploymentId { get; set; }
+    public int AttemptCount { get; set; }
+    public int ConsecutiveTransientErrors { get; set; }
+    public DateTimeOffset DetectedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? LastCheckedAtUtc { get; set; }
+    public DateTimeOffset? NextEligibleCheckUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public string? LastStatusMessage { get; set; }
+}

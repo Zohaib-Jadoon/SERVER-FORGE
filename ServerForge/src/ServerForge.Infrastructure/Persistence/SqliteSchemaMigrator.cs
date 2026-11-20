@@ -40,7 +40,7 @@ public sealed class SqliteMigrationException : Exception
 /// </summary>
 public static class SqliteSchemaMigrator
 {
-    public const int LatestSchemaVersion = 2;
+    public const int LatestSchemaVersion = 3;
 
     private const string VersionTableSql = """
         CREATE TABLE IF NOT EXISTS "__ServerForgeSchemaVersions" (
@@ -63,7 +63,8 @@ public static class SqliteSchemaMigrator
         ("DomainBindings", "Id", ["CertificateExpiresUtc", "LastDnsCheckUtc"]),
         ("DatabaseServers", "Id", ["CreatedAtUtc"]),
         ("BackupJobs", "Id", ["LastRunUtc"]),
-        ("AuditLogs", "Id", ["TimestampUtc"])
+        ("AuditLogs", "Id", ["TimestampUtc"]),
+        ("AutonomousDeploymentCandidates", "ApplicationId", ["DetectedAtUtc", "LastCheckedAtUtc", "NextEligibleCheckUtc", "UpdatedAtUtc"])
     ];
 
     public static async Task<int> GetSchemaVersionAsync(ServerForgeDbContext dbContext, CancellationToken ct = default)
@@ -113,6 +114,7 @@ public static class SqliteSchemaMigrator
             {
                 await RecordVersionAsync(sqliteConn, tx, 1, "BaselineSchema", null, ct).ConfigureAwait(false);
                 await RecordVersionAsync(sqliteConn, tx, 2, "NormalizeUtcIso8601Timestamps", null, ct).ConfigureAwait(false);
+                await RecordVersionAsync(sqliteConn, tx, 3, "AddAutonomousDeploymentCandidates", null, ct).ConfigureAwait(false);
                 await tx.CommitAsync(ct).ConfigureAwait(false);
             }
 
@@ -120,7 +122,7 @@ public static class SqliteSchemaMigrator
             return new SqliteMigrationResult(
                 PreviousVersion: 0,
                 CurrentVersion: LatestSchemaVersion,
-                AppliedVersions: [1, 2],
+                AppliedVersions: [1, 2, 3],
                 BackupFilePath: null,
                 NormalizedTimestampCount: 0,
                 WasFreshDatabase: true);
@@ -172,6 +174,13 @@ public static class SqliteSchemaMigrator
                 await EnsureTimestampIndexesAsync(sqliteConn, migrationTx, ct).ConfigureAwait(false);
                 await RecordVersionAsync(sqliteConn, migrationTx, 2, "NormalizeUtcIso8601Timestamps", backupPath, ct).ConfigureAwait(false);
                 appliedVersions.Add(2);
+            }
+
+            if (currentVersion < 3)
+            {
+                await EnsureAutonomousCandidateTableAsync(sqliteConn, migrationTx, ct).ConfigureAwait(false);
+                await RecordVersionAsync(sqliteConn, migrationTx, 3, "AddAutonomousDeploymentCandidates", backupPath, ct).ConfigureAwait(false);
+                appliedVersions.Add(3);
             }
 
             await migrationTx.CommitAsync(ct).ConfigureAwait(false);
@@ -430,6 +439,38 @@ public static class SqliteSchemaMigrator
             CREATE INDEX IF NOT EXISTS "IX_AuditLogs_TimestampUtc" ON "AuditLogs" ("TimestampUtc");
             """;
         await ExecuteNonQueryAsync(conn, tx, indexDdl, ct).ConfigureAwait(false);
+    }
+
+    private static async Task EnsureAutonomousCandidateTableAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        CancellationToken ct)
+    {
+        const string candidateDdl = """
+            CREATE TABLE IF NOT EXISTS "AutonomousDeploymentCandidates" (
+                "ApplicationId" TEXT NOT NULL CONSTRAINT "PK_AutonomousDeploymentCandidates" PRIMARY KEY,
+                "CommitSha" TEXT NOT NULL,
+                "Branch" TEXT NOT NULL,
+                "CommitMessage" TEXT NULL,
+                "CommitAuthor" TEXT NULL,
+                "LastBranchHeadETag" TEXT NULL,
+                "State" INTEGER NOT NULL,
+                "WorkflowRunId" INTEGER NULL,
+                "ArtifactId" INTEGER NULL,
+                "ArtifactName" TEXT NULL,
+                "DeploymentId" TEXT NULL,
+                "AttemptCount" INTEGER NOT NULL,
+                "ConsecutiveTransientErrors" INTEGER NOT NULL,
+                "DetectedAtUtc" TEXT NOT NULL,
+                "LastCheckedAtUtc" TEXT NULL,
+                "NextEligibleCheckUtc" TEXT NULL,
+                "UpdatedAtUtc" TEXT NOT NULL,
+                "LastStatusMessage" TEXT NULL
+            );
+            CREATE INDEX IF NOT EXISTS "IX_AutonomousDeploymentCandidates_State" ON "AutonomousDeploymentCandidates" ("State");
+            CREATE INDEX IF NOT EXISTS "IX_AutonomousDeploymentCandidates_NextEligibleCheckUtc" ON "AutonomousDeploymentCandidates" ("NextEligibleCheckUtc");
+            """;
+        await ExecuteNonQueryAsync(conn, tx, candidateDdl, ct).ConfigureAwait(false);
     }
 
     private static async Task<int> NormalizeAllTimestampsAsync(
