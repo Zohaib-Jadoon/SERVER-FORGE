@@ -1,0 +1,9 @@
+Product: ServerForge Personal Edition (Windows x64)
+Version: 1.0.0
+ReleaseTag: v1.0.0-personal
+Runtime: .NET 10 LTS (Self-Contained win-x64 — no .NET SDK required)
+Repository: https://github.com/Zohaib-Jadoon/SERVER-FORGE
+VerifiedBaselineCommit: f10ae9218ce0ddcc8f3453b0330cae05fe979242
+VerifiedBaselineCiRun: https://github.com/Zohaib-Jadoon/SERVER-FORGE/actions/runs/44870755690
+VerifiedBaselineChecks: 48/48 xUnit tests PASSED, 50/50 Windows installer & service smoke checks PASSED
+SigningStatus: Unsigned personal-use installers (verify SHA256SUMS.txt before execution)

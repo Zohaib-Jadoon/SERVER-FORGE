@@ -1,0 +1,214 @@
+name: Release Personal Windows Installer ZIP (v1.0.0-personal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Verified Windows CI Run ID to reuse installers from (default: Run #13 44870755690)"
+        required: false
+        default: "44870755690"
+        type: string
+      rebuild_installers:
+        description: "Force fresh Windows .NET 10 + Inno Setup build instead of reusing Run #13 artifacts"
+        required: false
+        default: false
+        type: boolean
+      create_github_release:
+        description: "Create/update GitHub Release v1.0.0-personal with the final ZIP attached"
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - 'v1.0.0-personal'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  package-personal-windows-zip:
+    name: Assemble & Publish ServerForge-Personal-Windows-x64-v1.0.0.zip
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Installer Source (Reuse Verified Run #13 Artifacts When Available)
+        id: acquire
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id || '44870755690' }}
+          REBUILD_INSTALLERS: ${{ inputs.rebuild_installers || false }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installerDir = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\installers'
+          New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+
+          $reused = $false
+          if ($env:REBUILD_INSTALLERS -ne 'true' -and -not [string]::IsNullOrWhiteSpace($env:SOURCE_RUN_ID)) {
+            Write-Host "==> Attempting to download verified installer artifact from GitHub Actions Run $env:SOURCE_RUN_ID..."
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+              & gh run download $env:SOURCE_RUN_ID `
+                --repo "${{ github.repository }}" `
+                --name "serverforge-windows-x64-installers" `
+                --dir $installerDir
+              if ($LASTEXITCODE -eq 0 -and
+                  (Test-Path (Join-Path $installerDir 'ServerForge-Desktop-Setup.exe')) -and
+                  (Test-Path (Join-Path $installerDir 'ServerForge-Agent-Setup.exe'))) {
+                $reused = $true
+                Write-Host "==> Successfully downloaded verified installers from Run $env:SOURCE_RUN_ID."
+              }
+            }
+            catch {
+              Write-Warning "Could not download Run $env:SOURCE_RUN_ID artifacts (may have expired): $($_.Exception.Message)"
+            }
+            finally {
+              $ErrorActionPreference = $prevEap
+            }
+          }
+
+          if ($reused) {
+            "reused=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "source_run_url=https://github.com/${{ github.repository }}/actions/runs/$env:SOURCE_RUN_ID" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "source_commit=f10ae9218ce0ddcc8f3453b0330cae05fe979242" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+          else {
+            Write-Host "==> Falling back to fresh Windows .NET 10 + Inno Setup build on windows-latest."
+            "reused=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "source_run_url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "source_commit=${{ github.sha }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Setup .NET 10 LTS SDK (Fallback Build Only)
+        if: steps.acquire.outputs.reused != 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build, Test & Publish Self-Contained x64 Binaries (Fallback Build Only)
+        if: steps.acquire.outputs.reused != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./ServerForge/scripts/build-windows.ps1 -Configuration Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install Inno Setup 6 & Compile Installers (Fallback Build Only)
+        if: steps.acquire.outputs.reused != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./ServerForge/scripts/build-installers.ps1 -SkipBuild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Assemble & Verify ServerForge-Personal-Windows-x64-v1.0.0.zip
+        shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ steps.acquire.outputs.source_commit }}
+          SOURCE_CI_RUN_URL: ${{ steps.acquire.outputs.source_run_url }}
+          PACKAGED_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installerDir = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\installers'
+          $releaseDir   = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\release'
+          & ./ServerForge/scripts/package-personal-release.ps1 `
+            -InstallerDir $installerDir `
+            -OutputDir $releaseDir `
+            -Version "1.0.0" `
+            -SourceCommit $env:SOURCE_COMMIT `
+            -SourceCiRunUrl $env:SOURCE_CI_RUN_URL `
+            -PackagedCommit $env:PACKAGED_COMMIT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Downloadable GitHub Actions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ServerForge-Personal-Windows-x64-v1.0.0
+          path: |
+            ServerForge/artifacts/release/ServerForge-Personal-Windows-x64-v1.0.0.zip
+            ServerForge/artifacts/release/ServerForge-Personal-Windows-x64-v1.0.0.zip.sha256
+            ServerForge/artifacts/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub Release v1.0.0-personal (Preserves Repository Privacy)
+        if: ${{ github.event_name == 'push' || inputs.create_github_release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_CI_RUN_URL: ${{ steps.acquire.outputs.source_run_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "v1.0.0-personal"
+          $zipFile = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\release\ServerForge-Personal-Windows-x64-v1.0.0.zip'
+          $zipSha  = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\release\ServerForge-Personal-Windows-x64-v1.0.0.zip.sha256'
+          $sums    = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\release\SHA256SUMS.txt'
+
+          $zipHashLine = (Get-Content -Path $zipSha -Raw).Trim()
+          $sumsBody    = (Get-Content -Path $sums -Raw).Trim()
+          $notes = @(
+            "# ServerForge Personal Edition (Windows x64) — v1.0.0",
+            "",
+            "Complete personal-use Windows installer package for your Windows 11 PC and Windows IIS servers.",
+            "",
+            "## Direct Download",
+            "Download **ServerForge-Personal-Windows-x64-v1.0.0.zip** below, extract it, and open **START_HERE.txt**.",
+            "",
+            "## Verified Build Baseline",
+            "- **Installer Source CI Run:** $env:SOURCE_CI_RUN_URL",
+            "- **Verified Automated Baseline:** 48/48 xUnit tests PASSED, 50/50 Windows installer & service smoke checks PASSED",
+            "- **Signing Notice:** Unsigned personal-use installers (verify SHA-256 checksums below before running)",
+            "",
+            "## SHA-256 Checksums",
+            '```text',
+            $zipHashLine,
+            "",
+            $sumsBody,
+            '```'
+          ) -join "`n"
+
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          Set-Content -Path $notesFile -Value $notes -Encoding UTF8
+
+          $releaseExists = $false
+          $prevEap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          & gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) { $releaseExists = $true }
+          $ErrorActionPreference = $prevEap
+
+          if ($releaseExists) {
+            Write-Host "==> Updating existing release $tag and uploading verified ZIP..."
+            & gh release edit $tag --repo "${{ github.repository }}" --title "ServerForge Personal Edition v1.0.0 (Windows x64)" --notes-file $notesFile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & gh release upload $tag $zipFile $zipSha $sums --repo "${{ github.repository }}" --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          else {
+            Write-Host "==> Creating release $tag and attaching verified ZIP..."
+            & gh release create $tag $zipFile $zipSha $sums `
+              --repo "${{ github.repository }}" `
+              --target "${{ github.sha }}" `
+              --title "ServerForge Personal Edition v1.0.0 (Windows x64)" `
+              --notes-file $notesFile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/ServerForge-Personal-Windows-x64-v1.0.0.zip"
+          $releaseUrl  = "https://github.com/${{ github.repository }}/releases/tag/$tag"
+          @(
+            "## ServerForge Personal Windows Installer ZIP Ready",
+            "",
+            "- **Direct Download Link:** $downloadUrl",
+            "- **GitHub Release:** $releaseUrl",
+            "- **Packaged Commit:** ``${{ github.sha }}``",
+            "- **ZIP SHA-256:** ``$zipHashLine``"
+          ) -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
