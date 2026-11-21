@@ -14,6 +14,7 @@ ServerForge is a self-hosted native Windows deployment manager built for managin
 | --- | --- |
 | `ServerForge-Desktop-Setup.exe` | Install on your **Windows 11 PC** (native WPF control center) |
 | `ServerForge-Agent-Setup.exe` | Install on each **Windows Server** you want to manage (Windows Service) |
+| `README.md` | Complete product overview, all 13 screens, shortcuts, and user guide |
 | `SHA256SUMS.txt` | Cryptographic SHA-256 checksums to verify every file in this package |
 | `START_HERE.txt` | Quick-start plain-text checklist |
 | `INSTALLATION_GUIDE.md` | This complete installation and operation guide |

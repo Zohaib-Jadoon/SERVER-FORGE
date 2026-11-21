@@ -86,7 +86,7 @@ if (Test-Path $SourceSums) {
     }
 }
 
-foreach ($docFile in @("START_HERE.txt", "INSTALLATION_GUIDE.md", "VERSION.txt")) {
+foreach ($docFile in @("README.md", "START_HERE.txt", "INSTALLATION_GUIDE.md", "VERSION.txt")) {
     $docPath = Join-Path $ReleaseDocsDir $docFile
     if (-not (Test-Path $docPath)) {
         throw "Required release documentation file missing: '$docPath'."
@@ -109,6 +109,7 @@ New-Item -ItemType Directory -Force -Path $OutputDir  | Out-Null
 Write-Host "==> Staging distribution folder: $PackageFolderName" -ForegroundColor Cyan
 Copy-Item -Path $DesktopExeSrc -Destination (Join-Path $PackageDir "ServerForge-Desktop-Setup.exe") -Force
 Copy-Item -Path $AgentExeSrc   -Destination (Join-Path $PackageDir "ServerForge-Agent-Setup.exe")   -Force
+Copy-Item -Path (Join-Path $ReleaseDocsDir "README.md")             -Destination (Join-Path $PackageDir "README.md")             -Force
 Copy-Item -Path (Join-Path $ReleaseDocsDir "START_HERE.txt")        -Destination (Join-Path $PackageDir "START_HERE.txt")        -Force
 Copy-Item -Path (Join-Path $ReleaseDocsDir "INSTALLATION_GUIDE.md") -Destination (Join-Path $PackageDir "INSTALLATION_GUIDE.md") -Force
 
@@ -136,6 +137,7 @@ Set-Content -Path (Join-Path $PackageDir "VERSION.txt") -Value ($versionContent 
 $filesToHash = @(
     "ServerForge-Desktop-Setup.exe",
     "ServerForge-Agent-Setup.exe",
+    "README.md",
     "START_HERE.txt",
     "INSTALLATION_GUIDE.md",
     "VERSION.txt"
@@ -170,6 +172,7 @@ $requiredEntries = @(
     "$PackageFolderName/ServerForge-Desktop-Setup.exe",
     "$PackageFolderName/ServerForge-Agent-Setup.exe",
     "$PackageFolderName/SHA256SUMS.txt",
+    "$PackageFolderName/README.md",
     "$PackageFolderName/START_HERE.txt",
     "$PackageFolderName/INSTALLATION_GUIDE.md",
     "$PackageFolderName/VERSION.txt"
