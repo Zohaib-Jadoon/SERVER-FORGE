@@ -3,7 +3,7 @@
 **Current Status:** **NOT VERIFIED**  
 **Reason:** Interactive WPF visual, tray, dialog, and multi-screen rendering checks require a real Windows 11 desktop session with an interactive logged-in user. No automated headless test or Linux container can substitute for this gate.
 
-**Target Build Under Test:** `ServerForge-Desktop-Setup.exe` (verified in CI Run #10 `44720053575`; re-test with CI Run #12 after Run #12 push)  
+**Target Build Under Test:** `ServerForge-Desktop-Setup.exe` (verified in CI Run #10 `44720053575`; re-test with CI Run #13 after Run #13 push)  
 **Native Technology Preserved:** Pure `.NET 10 LTS` WPF (`ServerForge.Desktop`, 13 native WPF pages + Windows Forms `NotifyIcon` system tray; zero React/Electron/WebView).
 
 ---

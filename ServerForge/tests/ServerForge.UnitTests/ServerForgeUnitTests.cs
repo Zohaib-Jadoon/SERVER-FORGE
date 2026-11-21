@@ -1495,11 +1495,14 @@ public sealed class DeploymentAndPersistenceTests
 
             // 4. Missing `path` on run list WITH `workflow_id` -> explicitly resolves `/actions/workflows/{id}` and succeeds!
             var resolvedWorkflowEndpointCalled = false;
+            var artifactListEndpointCalled = false;
+            var artifactDownloadEndpointCalled = false;
             var resolveByIdClient = new GitHubApiClient(
                 new HttpClient(new StubHttpHandler(req =>
                 {
                     var uri = req.RequestUri!.AbsoluteUri;
-                    if (uri.Contains("/actions/runs?"))
+                    var path = req.RequestUri.AbsolutePath;
+                    if (uri.Contains("/actions/runs?", StringComparison.Ordinal))
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
                             Content = new StringContent(JsonSerializer.Serialize(new
@@ -1519,7 +1522,7 @@ public sealed class DeploymentAndPersistenceTests
                                 }
                             }))
                         };
-                    if (uri.Contains("/actions/workflows/555"))
+                    if (path.Equals("/repos/owner/repo/actions/workflows/555", StringComparison.Ordinal))
                     {
                         resolvedWorkflowEndpointCalled = true;
                         return new HttpResponseMessage(HttpStatusCode.OK)
@@ -1531,7 +1534,9 @@ public sealed class DeploymentAndPersistenceTests
                             }))
                         };
                     }
-                    if (uri.Contains("/artifacts"))
+                    if (path.Equals("/repos/owner/repo/actions/runs/911/artifacts", StringComparison.Ordinal))
+                    {
+                        artifactListEndpointCalled = true;
                         return new HttpResponseMessage(HttpStatusCode.OK)
                         {
                             Content = new StringContent(JsonSerializer.Serialize(new
@@ -1551,18 +1556,32 @@ public sealed class DeploymentAndPersistenceTests
                                 }
                             }))
                         };
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(validZipBytes) };
+                    }
+                    if (path.Equals("/repos/owner/repo/actions/artifacts/556/zip", StringComparison.Ordinal))
+                    {
+                        artifactDownloadEndpointCalled = true;
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(validZipBytes) };
+                    }
+                    return new HttpResponseMessage(HttpStatusCode.NotFound)
+                    {
+                        Content = new StringContent($"Unexpected mock request: {req.Method} {uri}")
+                    };
                 })),
                 NullLogger<GitHubApiClient>.Instance);
 
             var resolvedDest = Path.Combine(tempRoot, "resolved.zip");
             var resolvedRes = await resolveByIdClient.DownloadVerifiedWorkflowArtifactAsync(
                 "pat", "owner/repo", "main", Commit1, "serverforge-deploy.yml", resolvedDest, CancellationToken.None);
-            Assert.True(resolvedWorkflowEndpointCalled);
-            Assert.True(resolvedRes.Found);
+            Assert.True(resolvedWorkflowEndpointCalled, "Expected GET /repos/owner/repo/actions/workflows/555 to be invoked.");
+            Assert.True(artifactListEndpointCalled, "Expected GET /repos/owner/repo/actions/runs/911/artifacts to be invoked.");
+            Assert.True(artifactDownloadEndpointCalled, "Expected GET /repos/owner/repo/actions/artifacts/556/zip to be invoked.");
+            Assert.True(
+                resolvedRes.Found,
+                $"Expected verified artifact download to succeed, but got ResolutionStatus={resolvedRes.ResolutionStatus}, ErrorMessage='{resolvedRes.ErrorMessage}'.");
             Assert.Equal(GitHubArtifactResolutionStatus.ArtifactVerified, resolvedRes.ResolutionStatus);
             Assert.Equal(911L, resolvedRes.WorkflowRunId);
             Assert.Equal(556L, resolvedRes.ArtifactId);
+            Assert.Equal(validSha, resolvedRes.ComputedSha256);
             Assert.True(File.Exists(resolvedDest));
         }
         finally

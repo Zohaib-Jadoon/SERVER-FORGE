@@ -1,9 +1,9 @@
-# ServerForge — Production Readiness Report (Phase 12.2 — Run #12 Repair)
+# ServerForge — Production Readiness Report (Phase 12.2 — Run #13 Mock Repair)
 
 **Overall Status:** **NOT PRODUCTION-READY**  
-**Last Verified Green Windows CI Run:** Run #10 (`44720053575`) @ commit `5226d810789413e01775c9e9f4e0348d080e6b61` (`42/42` xUnit + `50/50` smoke)  
-**Failed Windows CI Run:** Run #11 (`44739965264`) @ commit `1ae32e9b4224373c8cc568aa965ab3b3954cac6f` (`19` C# compilation errors in the 6 new Phase 12.2 tests; no installers generated)  
-**Current Working State:** All 19 test compilation errors repaired on disk (`48` total enabled xUnit tests, `0` skipped) — pending **Windows CI Run #12** and external Windows IIS / Windows 11 acceptance runs.
+**Last Fully Green Windows CI Run:** Run #10 (`44720053575`) @ commit `5226d810789413e01775c9e9f4e0348d080e6b61` (`42/42` xUnit + `50/50` smoke)  
+**Latest Windows CI Run:** Run #12 (`44745867909`) — Native `.NET 10` compilation **PASSED (0 errors)**, **47/48** xUnit tests **PASSED** (all `17/17` Agent tests passed), 1 unit test failed at `ServerForgeUnitTests.cs:1562` (`uri.Contains("/artifacts")` mock collision with `/actions/artifacts/556/zip`); installers & smoke skipped.  
+**Current Working State:** Exact `AbsolutePath` HTTP mock routing fixed in `ServerForgeUnitTests.cs` (`48` total enabled xUnit tests, `0` skipped; zero production changes) — pending **Windows CI Run #13** and external Windows IIS / Windows 11 acceptance runs.
 
 ---
 
@@ -11,7 +11,7 @@
 
 | # | Release Gate | Status | Evidence / Required Action |
 | --- | --- | --- | --- |
-| **1** | **Windows `.NET 10` Build, Automated Tests & Installers** | **VERIFIED AT RUN #10 (`42/42` + `50/50`); FAILED RUN #11 (19 TEST ERRORS) — REPAIRED PENDING CI RUN #12** | Run #10 (`44720053575`) passed all 42 xUnit tests, installers, SHA-256 checksums, and 50/50 smoke assertions. All 19 Run #11 test compile errors (`LoopbackSampleIisHost`, `CreateSampleAspNetCoreArtifactAsync`, `UpdateState`, `CS9007`) are fixed on disk — push to verify **48/48** xUnit + **50/50** smoke in Run #12. |
+| **1** | **Windows `.NET 10` Build, Automated Tests & Installers** | **VERIFIED AT RUN #10 (`42/42` + `50/50`); RUN #12 COMPILE PASS + `47/48` PASS — 1 MOCK FIX PENDING CI RUN #13** | Run #12 (`44745867909`) confirmed 0-error `.NET 10` build and `47/48` xUnit pass (including all 3 Phase 12.2 Agent polling tests). Fixed single unit-test mock collision (`ServerForgeUnitTests.cs:1562`) on disk — push to verify **48/48** xUnit + installers + **50/50** smoke in Run #13. |
 | **2** | **TEST A — Locally Built Sample Artifact Deployed to Real IIS** | **BLOCKED (REQUIRES DISPOSABLE WINDOWS IIS VM)** | Single safe entry point `run-disposable-iis-acceptance.ps1` + PS 5.1/7 scripts ready (`ManualSignedPackage`, `LOCAL TEST ARTIFACT`, live provenance guard probe, `web.config` check, HTTP 503 rollback, Agent restart resilience). Must execute on a disposable Windows IIS VM marked `SERVERFORGE_DISPOSABLE_E2E_HOST=true`. |
 | **3** | **TEST B — Real GitHub Actions Autonomous Deployment & Rollback** | **BLOCKED (REQUIRES DISPOSABLE WINDOWS IIS VM + DISPOSABLE GITHUB REPO)** | `run-disposable-iis-acceptance.ps1 -IncludeTestB` / `run-github-autonomous-test.ps1` implements all 18 steps with 0 `/api/v1/deployments/trigger` calls and exercises the Phase 12.2 HTTP 304 decoupled polling worker. Must execute against a disposable GitHub repo on a disposable Windows IIS VM. |
 | **4** | **Interactive Windows 11 WPF Desktop GUI Acceptance** | **NOT VERIFIED** | 17-point interactive checklist in `WINDOWS_DESKTOP_ACCEPTANCE.md` covering all 13 native WPF screens, themes, backups, and close-to-tray. Requires interactive Windows 11 testing. |
@@ -31,7 +31,7 @@
 
 ## Conditions Required Before Declaring Production-Ready
 
-1. Windows CI Run #12 (`build-windows-installers.yml`) completes **GREEN** with **48/48** xUnit tests, both installers + `SHA256SUMS.txt`, and **50/50** installer smoke checks.
+1. Windows CI Run #13 (`build-windows-installers.yml`) completes **GREEN** with **48/48** xUnit tests, both installers + `SHA256SUMS.txt`, and **50/50** installer smoke checks.
 2. **TEST A** passes on a genuine disposable Windows Server IIS VM with sanitized `deployment-evidence.json` and `rollback-evidence.json` recorded in `E2E_ACCEPTANCE_REPORT.md`.
 3. **TEST B** passes on a genuine disposable Windows Server IIS VM + disposable GitHub repo with real `workflowRunId`, `artifactId`, `commitSha`, and `deploymentId` recorded in `github-autonomous-evidence.json` and `E2E_ACCEPTANCE_REPORT.md`.
 4. **Interactive Windows 11 Desktop Acceptance** (`WINDOWS_DESKTOP_ACCEPTANCE.md`) passes all 17 checks across all 13 native WPF screens with zero blocking defects.

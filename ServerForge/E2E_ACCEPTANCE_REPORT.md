@@ -1,9 +1,9 @@
-# ServerForge — End-to-End Acceptance Report (Phase 12.2 — Run #12 Repair)
+# ServerForge — End-to-End Acceptance Report (Phase 12.2 — Run #13 Mock Repair)
 
 **Last Updated:** 2026-11-20  
-**Last Verified Green Windows CI Baseline:** Commit `5226d810789413e01775c9e9f4e0348d080e6b61` — GitHub Actions Run `44720053575` (**PASS**: `42/42` xUnit tests including server-side GitHub provenance rejection, Desktop & Agent installers built, SHA-256 verified, `50/50` installer smoke assertions)  
-**Failed Windows CI Run #11:** Commit `1ae32e9b4224373c8cc568aa965ab3b3954cac6f` — Run `44739965264` (**FAILED AT TEST COMPILE**: 19 errors in the 6 new Phase 12.2 tests; no installers generated)  
-**Current Run #12 Working State:** All 19 test compilation errors repaired on disk (`LiveLoopbackTargetHost.StartAsync()`, `CreateAspNetCoreSampleArtifactAsync`, `StoreProtectedGitHubPat`, `JsonSerializer.Serialize`), `48` enabled xUnit tests (`0` skipped), single safe disposable IIS entry point (`run-disposable-iis-acceptance.ps1`) verified — **Pending Windows CI Run #12**
+**Last Verified Fully Green Windows CI Baseline:** Commit `5226d810789413e01775c9e9f4e0348d080e6b61` — GitHub Actions Run `44720053575` (**PASS**: `42/42` xUnit tests including server-side GitHub provenance rejection, Desktop & Agent installers built, SHA-256 verified, `50/50` installer smoke assertions)  
+**Latest Windows CI Run #12:** Run `44745867909` (**COMPILE PASS, 47/48 xUnit PASS**: all `17/17` Agent tests passed; 1 unit test failed at `ServerForgeUnitTests.cs:1562` due to `uri.Contains("/artifacts")` mock collision with `/actions/artifacts/556/zip`; installers & smoke skipped)  
+**Current Run #13 Working State:** Exact `AbsolutePath` HTTP mock routing fixed in `ServerForgeUnitTests.cs` (`48` enabled xUnit tests, `0` skipped; zero production changes), single safe disposable IIS entry point (`run-disposable-iis-acceptance.ps1`) verified — **Pending Windows CI Run #13**
 
 ---
 
@@ -11,12 +11,12 @@
 
 | Gate | Scope | Current Status | Evidence / Blocker |
 | --- | --- | --- | --- |
-| **Gate 1 — Windows Build, Automated Tests & Installers** | Native `.NET 10` WPF + Agent build, xUnit suite, Inno Setup installers, SHA-256 checksums, 50/50 installer smoke tests | **VERIFIED AT RUN #10 (`42/42` + `50/50`); FAILED RUN #11 (19 TEST ERRORS) — REPAIRED PENDING CI RUN #12** | Run `44720053575` GREEN; all 19 Run `44739965264` test compile errors fixed on disk for Run #12 (`48` tests) |
+| **Gate 1 — Windows Build, Automated Tests & Installers** | Native `.NET 10` WPF + Agent build, xUnit suite, Inno Setup installers, SHA-256 checksums, 50/50 installer smoke tests | **VERIFIED AT RUN #10 (`42/42` + `50/50`); RUN #12 COMPILE PASS + `47/48` PASS — 1 MOCK FIX PENDING CI RUN #13** | Run `44720053575` GREEN; Run `44745867909` passed `.NET 10` compile + `47/48` tests; single mock-routing bug fixed on disk for Run #13 (`48` tests) |
 | **Gate 2 — TEST A: Locally Built Sample Artifact on Actual Windows IIS** | Real IIS site/AppPool (`appcmd`, `w3wp.exe`, `AspNetCoreModuleV2`), `ManualSignedPackage` (`LOCAL TEST ARTIFACT`), v1 → v2 → HTTP 503 auto-rollback → Agent restart resilience | **BLOCKED — NO DISPOSABLE WINDOWS IIS VM ATTACHED** | Cannot execute IIS inside Linux container; never run against production IIS. Run `run-disposable-iis-acceptance.ps1` (or step scripts with exact required flags) on a disposable Windows Server IIS VM marked `SERVERFORGE_DISPOSABLE_E2E_HOST=true` |
 | **Gate 3 — TEST B: Genuine Autonomous GitHub Actions Deployment & Rollback** | Dedicated disposable GitHub repo, root `.github/workflows/serverforge-deploy.yml`, test-only PAT, Desktop closed, ZERO `/api/v1/deployments/trigger` calls, real `GitHubAutoDeployWorker` v1 → v2 → unhealthy v3 rollback → non-retry after restart → v4 recovery | **BLOCKED — NO DISPOSABLE WINDOWS IIS VM / DISPOSABLE GITHUB REPO EXECUTED YET** | `run-disposable-iis-acceptance.ps1 -IncludeTestB` / `run-github-autonomous-test.ps1` exercises the Phase 12.2 HTTP 304 decoupled polling worker; awaiting execution on a disposable Windows IIS VM with a disposable test repo |
 | **Gate 4 — Interactive Windows 11 WPF Desktop Acceptance** | Real Windows 11 GUI session across all 13 native WPF screens, setup wizard, pairing, backups, themes, close-to-tray, reopen, exit | **NOT VERIFIED** | Structured checklist ready in `ServerForge/WINDOWS_DESKTOP_ACCEPTANCE.md`; requires real Windows 11 interactive desktop testing |
 
-**Production Readiness Determination:** **NOT PRODUCTION-READY** until Gates 1 (CI Run #12), 2 (TEST A), 3 (TEST B), and 4 (Windows 11 GUI) all record real passing evidence.
+**Production Readiness Determination:** **NOT PRODUCTION-READY** until Gates 1 (CI Run #13), 2 (TEST A), 3 (TEST B), and 4 (Windows 11 GUI) all record real passing evidence.
 
 ---
 
