@@ -23,6 +23,7 @@ public partial class App : Application
 {
     private ServiceProvider? _serviceProvider;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
+    private System.Drawing.Icon? _customTrayIcon;
     private bool _isExplicitExit;
 
     protected override async void OnStartup(StartupEventArgs e)
@@ -179,11 +180,24 @@ public partial class App : Application
 
     private void InitializeSystemTray()
     {
+        var customIconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "serverforge.ico");
+        if (File.Exists(customIconPath))
+        {
+            try
+            {
+                _customTrayIcon = new System.Drawing.Icon(customIconPath);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Could not load custom tray icon from {Path}; falling back to default shield icon.", customIconPath);
+            }
+        }
+
         _trayIcon = new System.Windows.Forms.NotifyIcon
         {
             Text = "ServerForge Desktop — Native Windows Deployment Platform",
             Visible = true,
-            Icon = System.Drawing.SystemIcons.Shield
+            Icon = _customTrayIcon ?? System.Drawing.SystemIcons.Shield
         };
 
         var menu = new System.Windows.Forms.ContextMenuStrip();
@@ -220,6 +234,7 @@ public partial class App : Application
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
         }
+        _customTrayIcon?.Dispose();
         _serviceProvider?.Dispose();
         Log.CloseAndFlush();
         base.OnExit(e);

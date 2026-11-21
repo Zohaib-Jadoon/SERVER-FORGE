@@ -99,9 +99,15 @@ export default function App() {
               e.preventDefault();
               setActiveTab('explorer');
             }}
-            className="text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0"
+            className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0"
           >
-            ServerForge
+            <img
+              src="/serverforge-icon.png"
+              alt="ServerForge icon"
+              referrerPolicy="no-referrer"
+              className="w-8 h-8 rounded-lg shrink-0"
+            />
+            <span>ServerForge</span>
           </a>
 
           <nav aria-label="Workspace views" className="flex items-center gap-6 text-sm font-medium">

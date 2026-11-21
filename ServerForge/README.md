@@ -1,3 +1,7 @@
+<p align="left">
+  <img src="assets/serverforge-icon.png" alt="ServerForge Icon" width="72" height="72" />
+</p>
+
 # ServerForge — Native Windows Self-Hosted Deployment Platform
 
 ServerForge is a genuine native Windows (.NET 10 LTS / WPF + Windows Worker Service) self-hosted deployment platform for managing Windows Servers, Microsoft IIS, WinSW/Windows Services, GitHub automated deployments, domains/SSL, environment variables, SQL Server, and PostgreSQL.

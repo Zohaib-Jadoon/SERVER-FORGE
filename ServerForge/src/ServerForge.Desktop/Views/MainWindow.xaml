@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:pages="clr-namespace:ServerForge.Desktop.Views.Pages"
         Title="ServerForge — Native Windows Self-Hosted Deployment Platform"
+        Icon="pack://application:,,,/Assets/serverforge-icon.png"
         Width="1380" Height="880"
         MinWidth="1040" MinHeight="680"
         WindowStartupLocation="CenterScreen"
@@ -34,9 +35,16 @@
         <!-- Native WPF Navigation Sidebar (All 13 Functional Sections) -->
         <Border Grid.Column="0" Background="{DynamicResource SidebarBackgroundBrush}" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,0,1,0">
             <DockPanel LastChildFill="True">
-                <StackPanel DockPanel.Dock="Top" Margin="18,18,18,14">
-                    <TextBlock Text="ServerForge" FontSize="19" FontWeight="Bold" />
-                    <TextBlock Text="Windows Deployment Control" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" />
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="16,18,16,14" VerticalAlignment="Center">
+                    <Image Source="pack://application:,,,/Assets/serverforge-icon.png"
+                           Width="34" Height="34"
+                           RenderOptions.BitmapScalingMode="HighQuality"
+                           VerticalAlignment="Center"
+                           Margin="0,0,10,0" />
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="ServerForge" FontSize="19" FontWeight="Bold" />
+                        <TextBlock Text="Windows Deployment Control" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" />
+                    </StackPanel>
                 </StackPanel>
 
                 <StackPanel DockPanel.Dock="Bottom" Margin="12,12,12,16">

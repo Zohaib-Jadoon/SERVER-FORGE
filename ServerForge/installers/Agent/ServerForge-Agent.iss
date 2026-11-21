@@ -31,6 +31,7 @@ OutputBaseFilename=ServerForge-Agent-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\Assets\serverforge.ico
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=ServerForge Agent — Autonomous Windows Server Deployment Service

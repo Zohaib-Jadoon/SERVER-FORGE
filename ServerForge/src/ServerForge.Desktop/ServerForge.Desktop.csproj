@@ -9,7 +9,14 @@
     <PublishSingleFile>false</PublishSingleFile>
     <AssemblyName>ServerForge.Desktop</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\serverforge.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\serverforge-icon.png" />
+    <Content Include="Assets\serverforge.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
   <ItemGroup>
     <!-- Prevent ImplicitUsings from globally importing WinForms/GDI+ types that collide with WPF (e.g. UserControl, Application).
          UseWindowsForms remains enabled for explicit System.Windows.Forms.NotifyIcon system tray support. -->

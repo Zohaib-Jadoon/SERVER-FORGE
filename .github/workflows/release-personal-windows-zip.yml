@@ -9,9 +9,9 @@ on:
         default: "44870755690"
         type: string
       rebuild_installers:
-        description: "Force fresh Windows .NET 10 + Inno Setup build instead of reusing Run #13 artifacts"
+        description: "Build fresh Windows .NET 10 + Inno Setup installers (recommended so new icon & assets are embedded)"
         required: false
-        default: false
+        default: true
         type: boolean
       create_github_release:
         description: "Create/update GitHub Release v1.0.0-personal with the final ZIP attached"
@@ -42,7 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id || '44870755690' }}
-          REBUILD_INSTALLERS: ${{ inputs.rebuild_installers || false }}
+          REBUILD_INSTALLERS: ${{ github.event_name == 'push' || inputs.rebuild_installers }}
         run: |
           $ErrorActionPreference = 'Stop'
           $installerDir = Join-Path $env:GITHUB_WORKSPACE 'ServerForge\artifacts\installers'
